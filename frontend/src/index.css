@@ -1,0 +1,62 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  @apply min-h-screen bg-canvas font-body text-text antialiased;
+  background-image:
+    radial-gradient(circle at top left, rgba(45, 212, 191, 0.18), transparent 22%),
+    radial-gradient(circle at top right, rgba(56, 189, 248, 0.14), transparent 24%),
+    linear-gradient(180deg, rgba(13, 17, 23, 1) 0%, rgba(13, 17, 23, 1) 100%);
+}
+
+#root {
+  @apply min-h-screen;
+}
+
+* {
+  scrollbar-color: rgba(56, 189, 248, 0.45) rgba(17, 22, 31, 0.55);
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(56, 189, 248, 0.4);
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(17, 22, 31, 0.5);
+}
+
+.glass-panel {
+  @apply rounded-3xl border border-white/10 bg-panel/80 backdrop-blur-xl;
+}
+
+.panel-grid {
+  @apply glass-panel p-5 shadow-glow;
+}
+
+.chip {
+  @apply inline-flex items-center rounded-full border border-white/10 px-3 py-1 text-xs font-semibold tracking-wide text-white/80;
+}
+
+.input-dark {
+  @apply w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white outline-none transition focus:border-neon-blue/70 focus:ring-2 focus:ring-neon-blue/20;
+}
+
+.button-primary {
+  @apply inline-flex items-center justify-center rounded-2xl bg-gradient-to-r from-neon-blue to-neon-cyan px-4 py-3 text-sm font-bold text-slate-950 transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50;
+}
+
+.button-secondary {
+  @apply inline-flex items-center justify-center rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-semibold text-white transition hover:border-neon-blue/60 hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-50;
+}
+
