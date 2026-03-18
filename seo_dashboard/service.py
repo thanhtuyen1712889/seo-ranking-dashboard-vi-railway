@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import os
+import re
 from collections import Counter, defaultdict
 from datetime import datetime
 from statistics import mean
@@ -17,9 +18,10 @@ from .ai import (
 )
 from .db import get_connection, transaction
 from .ingestion import (
-    fetch_google_sheet,
+    fetch_public_data_source,
     infer_sub_cluster_name,
     kpi_type_from_target,
+    normalize_label,
     parse_spreadsheet_payload,
 )
 
@@ -55,6 +57,42 @@ def safe_mean(values: list[float]) -> float | None:
     if not values:
         return None
     return round(float(mean(values)), 2)
+
+
+def clamp(value: float, minimum: float, maximum: float) -> float:
+    return max(minimum, min(maximum, value))
+
+
+PRODUCT_CLUSTER_LABELS = {
+    "plugin": "Plugin",
+    "module": "Module",
+    "extension": "Extension",
+    "theme": "Theme",
+    "store": "Store",
+    "seo_extension": "SEO Extension",
+}
+
+PLATFORM_LABELS = {
+    "magento_2": "Magento 2",
+    "magento_1_or_generic": "Magento",
+    "shopify": "Shopify",
+    "woocommerce": "WooCommerce",
+}
+
+USE_CASE_LABELS = {
+    "b2b": "B2B",
+    "integration": "Integration",
+    "checkout": "Checkout",
+    "subscription": "Subscription",
+    "login": "Login",
+}
+
+CLUSTER_SORTS = {
+    "health_score": ("health_score", True),
+    "trend_strength": ("rank_delta", True),
+    "total_volume": ("total_volume", True),
+    "avg_rank": ("avg_rank_current", False),
+}
 
 
 class DashboardService:
@@ -144,17 +182,19 @@ class DashboardService:
         project = self.get_project(project_id)
         return (project.get("anthropic_api_key") or os.getenv("ANTHROPIC_API_KEY") or "").strip() or None
 
-    def test_google_sheet(self, sheet_url: str) -> dict[str, Any]:
-        payload, filename, gid = fetch_google_sheet(sheet_url)
+    def test_google_sheet(self, sheet_url: str, sheet_gid: str | None = None) -> dict[str, Any]:
+        payload, filename, gid, source_type = fetch_public_data_source(sheet_url, preferred_gid=sheet_gid)
         parsed = parse_spreadsheet_payload(filename, payload, source_name="Google Sheets")
         return {
             "ok": True,
             "source_name": parsed.source_name,
             "dates": parsed.dates,
             "header_row_index": parsed.header_row_index,
+            "selected_sheet_name": parsed.selected_sheet_name,
             "warnings": parsed.warnings[:10],
             "row_count": len(parsed.rows),
             "sheet_gid": gid,
+            "source_type": source_type,
         }
 
     def import_upload(self, project_id: int, filename: str, payload: bytes) -> dict[str, Any]:
@@ -171,12 +211,15 @@ class DashboardService:
         sheet_url = (project.get("sheet_url") or "").strip()
         if not sheet_url:
             raise ValueError("Project chưa có Google Sheet URL.")
-        payload, filename, gid = fetch_google_sheet(sheet_url)
+        payload, filename, gid, source_type = fetch_public_data_source(
+            sheet_url,
+            preferred_gid=project.get("sheet_gid"),
+        )
         parsed = parse_spreadsheet_payload(filename, payload, source_name="Google Sheets")
         return self._ingest_parsed_sheet(
             project_id,
             parsed,
-            source_type="google_sheet",
+            source_type=source_type,
             source_name="Google Sheets",
             sheet_url=sheet_url,
             sheet_gid=gid,
@@ -194,6 +237,9 @@ class DashboardService:
     ) -> dict[str, Any]:
         existing_dates = set(self.get_project_dates(project_id))
         imported_rankings = 0
+        display_source_name = source_name
+        if getattr(parsed, "selected_sheet_name", None):
+            display_source_name = f"{source_name} · {parsed.selected_sheet_name}"
         with transaction() as connection:
             existing_keywords = {
                 row["keyword"]: dict(row)
@@ -275,7 +321,7 @@ class DashboardService:
                     sheet_gid = COALESCE(?, sheet_gid), last_pulled_at = ?
                 WHERE id = ?
                 """,
-                (source_name, source_type, sheet_url, sheet_gid, current_time, project_id),
+                (display_source_name, source_type, sheet_url, sheet_gid, current_time, project_id),
             )
             self._recalculate_deltas(connection, project_id)
             self._refresh_clusters(connection, project_id, parsed)
@@ -283,7 +329,7 @@ class DashboardService:
         new_dates = sorted(set(parsed.dates) - existing_dates)
         self.refresh_anomaly_events(project_id)
         if new_dates:
-            self.generate_weekly_summary(project_id)
+            self.generate_weekly_summary(project_id, force=False)
         return {
             "project": self.get_project(project_id),
             "imported_keywords": len(parsed.rows),
@@ -389,11 +435,13 @@ class DashboardService:
         refresh_interval_minutes = int(payload.get("refresh_interval_minutes") or project.get("refresh_interval_minutes") or 30)
         anthropic_api_key = (payload.get("anthropic_api_key") or project.get("anthropic_api_key") or "").strip() or None
         name = (payload.get("name") or project["name"]).strip() or project["name"]
-        sheet_gid = project.get("sheet_gid")
+        sheet_gid = (payload.get("sheet_gid") or project.get("sheet_gid") or "").strip() or None
+        source_type = project.get("source_type") or "upload"
         if sheet_url:
             try:
-                test_result = self.test_google_sheet(sheet_url)
-                sheet_gid = test_result.get("sheet_gid")
+                test_result = self.test_google_sheet(sheet_url, sheet_gid)
+                sheet_gid = test_result.get("sheet_gid") or sheet_gid
+                source_type = test_result.get("source_type") or source_type
             except Exception:
                 sheet_gid = project.get("sheet_gid")
         with transaction() as connection:
@@ -401,7 +449,7 @@ class DashboardService:
                 """
                 UPDATE projects
                 SET name = ?, sheet_url = ?, sheet_gid = ?, source_name = ?,
-                    refresh_interval_minutes = ?, anthropic_api_key = ?
+                    source_type = ?, refresh_interval_minutes = ?, anthropic_api_key = ?
                 WHERE id = ?
                 """,
                 (
@@ -409,6 +457,7 @@ class DashboardService:
                     sheet_url,
                     sheet_gid,
                     source_name,
+                    source_type,
                     refresh_interval_minutes,
                     anthropic_api_key,
                     project_id,
@@ -632,6 +681,371 @@ class DashboardService:
             entry["status"] = "đạt" if entry["achieved"] == entry["keyword_count"] else "chưa đạt"
         return metrics
 
+    def _keyword_subcluster_tags(self, keyword: dict[str, Any]) -> list[str]:
+        group_name = keyword.get("group_name") or "general"
+        cluster_name = keyword.get("cluster_name") or ""
+        combined = normalize_label(" ".join([keyword.get("keyword") or "", group_name, cluster_name]))
+        tags: list[str] = []
+
+        if re.search(r"\bseo\b", combined):
+            tags.append("seo_extension")
+        for token in ("plugin", "module", "extension", "theme", "store"):
+            if re.search(rf"\b{token}\b", combined):
+                tags.append(token)
+
+        if "magento 2" in combined or "for magento 2" in combined:
+            tags.append("magento_2")
+        elif "magento" in combined:
+            tags.append("magento_1_or_generic")
+        if "shopify" in combined:
+            tags.append("shopify")
+        if "woocommerce" in combined:
+            tags.append("woocommerce")
+
+        for token in ("b2b", "integration", "checkout", "login"):
+            if re.search(rf"\b{token}\b", combined):
+                tags.append(token)
+        if "subscription" in combined or "recurring" in combined:
+            tags.append("subscription")
+
+        normalized_group = normalize_label(group_name).replace(" ", "_")
+        if normalized_group:
+            tags.append(normalized_group)
+        return sorted(set(tags))
+
+    def _subcluster_descriptor(self, keyword: dict[str, Any]) -> tuple[str, str, list[str]]:
+        tags = self._keyword_subcluster_tags(keyword)
+        product_tag = next(
+            (tag for tag in ("seo_extension", "extension", "module", "plugin", "theme", "store") if tag in tags),
+            None,
+        )
+        platform_tag = next(
+            (tag for tag in ("magento_2", "shopify", "woocommerce", "magento_1_or_generic") if tag in tags),
+            None,
+        )
+        use_case_tag = next(
+            (tag for tag in ("b2b", "integration", "checkout", "subscription", "login") if tag in tags),
+            None,
+        )
+
+        cluster_id_parts: list[str] = []
+        cluster_label = ""
+        if product_tag:
+            cluster_id_parts.append(product_tag)
+            cluster_label = PRODUCT_CLUSTER_LABELS[product_tag]
+            if platform_tag:
+                cluster_id_parts.append(platform_tag)
+                cluster_label = f"{cluster_label} ({PLATFORM_LABELS[platform_tag]})"
+        elif use_case_tag:
+            cluster_id_parts.append(use_case_tag)
+            cluster_label = USE_CASE_LABELS[use_case_tag]
+            if platform_tag:
+                cluster_id_parts.append(platform_tag)
+                cluster_label = f"{cluster_label} ({PLATFORM_LABELS[platform_tag]})"
+        elif platform_tag:
+            cluster_id_parts.append(platform_tag)
+            cluster_label = PLATFORM_LABELS[platform_tag]
+        else:
+            fallback_name = (keyword.get("cluster_name") or keyword.get("group_name") or "Khác").strip()
+            cluster_id_parts.append(normalize_label(fallback_name).replace(" ", "_") or "other")
+            cluster_label = fallback_name
+
+        cluster_id = "_".join(cluster_id_parts)
+        return cluster_id, cluster_label, tags
+
+    def _cluster_keyword_row(
+        self,
+        keyword: dict[str, Any],
+        current_date: str,
+        baseline_date: str | None,
+    ) -> dict[str, Any] | None:
+        current_rank = self._history_position(keyword["history"], current_date)
+        if current_rank is None:
+            return None
+        previous_rank = self._history_position(keyword["history"], baseline_date) if baseline_date else None
+        rank_delta = None if previous_rank is None else round(float(previous_rank - current_rank), 2)
+        trend_status = "stable"
+        if rank_delta is not None:
+            if rank_delta >= 2:
+                trend_status = "rising"
+            elif rank_delta <= -2:
+                trend_status = "declining"
+        cluster_id, cluster_name, tags = self._subcluster_descriptor(keyword)
+        return {
+            "keyword_id": keyword["id"],
+            "keyword": keyword["keyword"],
+            "cluster_id": cluster_id,
+            "cluster_name": cluster_name,
+            "group_name": keyword.get("group_name") or "Chưa phân nhóm",
+            "cluster_origin": keyword.get("cluster_name") or keyword.get("group_name") or "Chưa phân nhóm",
+            "tags": tags,
+            "volume": keyword.get("search_volume") or 0,
+            "current_rank": current_rank,
+            "previous_rank": previous_rank,
+            "rank_delta": rank_delta,
+            "trend_status": trend_status,
+            "history": keyword["history"],
+            "kpi_target": int(keyword.get("kpi_target") or 10),
+        }
+
+    def _cluster_priority_label(
+        self,
+        *,
+        avg_rank_current: float | None,
+        trend_status: str,
+        health_score: int,
+        avg_rank_previous: float | None,
+    ) -> str:
+        if avg_rank_current is not None and avg_rank_current < 5 and trend_status == "rising" and health_score >= 70:
+            return "Rising & strong"
+        if trend_status == "rising" and (avg_rank_current is None or avg_rank_current >= 5):
+            return "Rising & opportunity"
+        if trend_status == "declining":
+            return "Declining"
+        if (
+            avg_rank_current is not None
+            and avg_rank_previous is not None
+            and avg_rank_current > 10
+            and avg_rank_previous <= 10
+        ):
+            return "Declining"
+        return "Stable"
+
+    def _cluster_insight_note(self, cluster: dict[str, Any]) -> str:
+        improved = sum(1 for item in cluster["keywords"] if (item["rank_delta"] or 0) >= 2)
+        declined = sum(1 for item in cluster["keywords"] if (item["rank_delta"] or 0) <= -2)
+        if cluster["priority_label"] == "Rising & strong":
+            return (
+                f"Cụm '{cluster['cluster_name']}' đang giữ đà tốt: {improved} keyword tiếp tục cải thiện "
+                "và đã đứng ở vùng dễ chuyển đổi. Nên giữ nhịp tối ưu và mở rộng thêm landing page liên quan."
+            )
+        if cluster["priority_label"] == "Rising & opportunity":
+            return (
+                f"Cụm '{cluster['cluster_name']}' đang đi lên nhưng vẫn còn dư địa lớn. "
+                f"Có {improved} keyword tăng rõ, phù hợp để đẩy thêm content, internal link và backlink."
+            )
+        if cluster["priority_label"] == "Declining":
+            return (
+                f"Cụm '{cluster['cluster_name']}' đang cần xử lý: {declined} keyword giảm đáng kể "
+                "và kéo tụt hiệu suất chung. Nên kiểm tra intent, đối thủ và thay đổi kỹ thuật gần đây."
+            )
+        return (
+            f"Cụm '{cluster['cluster_name']}' hiện khá ổn định, chưa có biến động đủ lớn để đổi ưu tiên. "
+            "Phù hợp để tiếp tục theo dõi và tối ưu định kỳ."
+        )
+
+    def _build_cluster_view(
+        self,
+        project_id: int,
+        *,
+        current_date: str,
+        baseline_date: str,
+        selected_group: str | None,
+        status_filter: str,
+        tag_filter: str,
+        sort_by: str,
+    ) -> dict[str, Any]:
+        keywords = self._load_keywords_with_history(project_id)
+        groups = sorted({(keyword.get("group_name") or "Chưa phân nhóm") for keyword in keywords})
+        selected_group = selected_group or (groups[0] if groups else None)
+        relevant_rows = []
+        for keyword in keywords:
+            if selected_group and (keyword.get("group_name") or "Chưa phân nhóm") != selected_group:
+                continue
+            row = self._cluster_keyword_row(keyword, current_date, baseline_date)
+            if row is None:
+                continue
+            relevant_rows.append(row)
+
+        cluster_map: dict[str, dict[str, Any]] = {}
+        for row in relevant_rows:
+            cluster = cluster_map.setdefault(
+                row["cluster_id"],
+                {
+                    "cluster_id": row["cluster_id"],
+                    "cluster_name": row["cluster_name"],
+                    "tags": sorted(set(row["tags"])),
+                    "keywords": [],
+                    "current_ranks": [],
+                    "previous_ranks": [],
+                    "volumes": [],
+                },
+            )
+            cluster["keywords"].append(row)
+            cluster["current_ranks"].append(row["current_rank"])
+            if row["previous_rank"] is not None:
+                cluster["previous_ranks"].append(row["previous_rank"])
+            if row["volume"]:
+                cluster["volumes"].append(float(row["volume"]))
+            cluster["tags"] = sorted(set(cluster["tags"]) | set(row["tags"]))
+
+        max_total_volume = max((sum(cluster["volumes"]) for cluster in cluster_map.values()), default=1.0)
+        dates = self.get_project_dates(project_id)
+        recent_dates = dates[-30:] if len(dates) > 30 else dates
+        cluster_list: list[dict[str, Any]] = []
+        drilldown_tables: list[dict[str, Any]] = []
+
+        for cluster in cluster_map.values():
+            avg_rank_current = safe_mean(cluster["current_ranks"])
+            avg_rank_previous = safe_mean(cluster["previous_ranks"])
+            rank_delta = (
+                round(float(avg_rank_previous - avg_rank_current), 2)
+                if avg_rank_current is not None and avg_rank_previous is not None
+                else 0.0
+            )
+            if rank_delta >= 2:
+                trend_status = "rising"
+            elif rank_delta <= -2:
+                trend_status = "declining"
+            else:
+                trend_status = "stable"
+
+            total_volume = int(sum(cluster["volumes"]))
+            avg_volume = round(total_volume / len(cluster["keywords"]), 1) if cluster["keywords"] else 0
+            rank_component = 0 if avg_rank_current is None else clamp((101 - avg_rank_current) / 100 * 100, 0, 100)
+            trend_component = clamp(50 + rank_delta * 12, 0, 100)
+            volume_component = clamp((total_volume / max_total_volume) * 100 if max_total_volume else 0, 0, 100)
+            health_score = int(round((rank_component * 0.5) + (trend_component * 0.25) + (volume_component * 0.25)))
+            priority_label = self._cluster_priority_label(
+                avg_rank_current=avg_rank_current,
+                trend_status=trend_status,
+                health_score=health_score,
+                avg_rank_previous=avg_rank_previous,
+            )
+
+            sorted_keywords = sorted(
+                cluster["keywords"],
+                key=lambda item: (
+                    -float(item["volume"] or 0),
+                    -abs(float(item["rank_delta"] or 0)),
+                    item["current_rank"],
+                ),
+            )
+            top_keywords = [
+                {
+                    "keyword": item["keyword"],
+                    "tags": item["tags"],
+                    "volume": item["volume"],
+                    "current_rank": item["current_rank"],
+                    "previous_rank": item["previous_rank"],
+                    "rank_delta": item["rank_delta"] or 0,
+                    "trend_status": item["trend_status"],
+                }
+                for item in sorted_keywords[:5]
+            ]
+
+            points = []
+            for rank_date in recent_dates:
+                values = [
+                    self._history_position(item["history"], rank_date)
+                    for item in cluster["keywords"]
+                ]
+                valid_values = [float(value) for value in values if value is not None]
+                if not valid_values:
+                    continue
+                points.append({"date": rank_date, "value": round(sum(valid_values) / len(valid_values), 2)})
+            previous_window = [point["value"] for point in points[-14:-7]]
+            current_window = [point["value"] for point in points[-7:]]
+            previous_avg = safe_mean(previous_window)
+            current_avg = safe_mean(current_window)
+            delta_vs_previous_period = 0
+            if previous_avg and current_avg:
+                delta_vs_previous_period = round(((previous_avg - current_avg) / previous_avg) * 100, 1)
+
+            cluster_row = {
+                "cluster_id": cluster["cluster_id"],
+                "cluster_name": cluster["cluster_name"],
+                "tags": cluster["tags"],
+                "keyword_count": len(cluster["keywords"]),
+                "total_volume": total_volume,
+                "avg_volume": avg_volume,
+                "avg_rank_current": avg_rank_current or 0,
+                "avg_rank_previous": avg_rank_previous or 0,
+                "rank_delta": rank_delta,
+                "trend_status": trend_status,
+                "health_score": health_score,
+                "priority_label": priority_label,
+                "top_keywords": top_keywords,
+                "sparkline": {
+                    "metric": "avg_rank",
+                    "time_range": "last_30_days",
+                    "points": points,
+                    "delta_vs_previous_period": delta_vs_previous_period,
+                },
+                "insight_note": "",
+                "keywords": sorted(
+                    [
+                        {
+                            "keyword": item["keyword"],
+                            "tags": item["tags"],
+                            "volume": item["volume"],
+                            "current_rank": item["current_rank"],
+                            "previous_rank": item["previous_rank"],
+                            "rank_delta": item["rank_delta"] or 0,
+                            "trend_status": item["trend_status"],
+                            "clicks": 0,
+                            "impressions": 0,
+                        }
+                        for item in cluster["keywords"]
+                    ],
+                    key=lambda item: (item["current_rank"], -float(item["volume"] or 0), item["keyword"].lower()),
+                ),
+            }
+            cluster_row["insight_note"] = self._cluster_insight_note(cluster_row)
+            cluster_list.append(cluster_row)
+            drilldown_tables.append(
+                {
+                    "cluster_id": cluster_row["cluster_id"],
+                    "keywords": cluster_row["keywords"],
+                }
+            )
+
+        available_tags = sorted({tag for cluster in cluster_list for tag in cluster["tags"]})
+        if tag_filter != "all":
+            cluster_list = [cluster for cluster in cluster_list if tag_filter in cluster["tags"]]
+            drilldown_tables = [table for table in drilldown_tables if any(cluster["cluster_id"] == table["cluster_id"] for cluster in cluster_list)]
+        if status_filter != "all":
+            cluster_list = [cluster for cluster in cluster_list if cluster["trend_status"] == status_filter]
+            drilldown_tables = [table for table in drilldown_tables if any(cluster["cluster_id"] == table["cluster_id"] for cluster in cluster_list)]
+
+        sort_field, descending = CLUSTER_SORTS.get(sort_by, CLUSTER_SORTS["health_score"])
+        cluster_list.sort(
+            key=lambda item: (item.get(sort_field) is None, item.get(sort_field, 0)),
+            reverse=descending,
+        )
+        selected_cluster = cluster_list[0] if cluster_list else None
+        trend_panel = {
+            "selected_cluster_id": selected_cluster["cluster_id"] if selected_cluster else None,
+            "kpis": {
+                "total_volume": selected_cluster["total_volume"] if selected_cluster else 0,
+                "avg_rank_current": selected_cluster["avg_rank_current"] if selected_cluster else 0,
+                "rank_delta": selected_cluster["rank_delta"] if selected_cluster else 0,
+                "health_score": selected_cluster["health_score"] if selected_cluster else 0,
+                "trend_status": selected_cluster["trend_status"] if selected_cluster else "stable",
+            },
+            "sparkline": selected_cluster["sparkline"] if selected_cluster else {"metric": "avg_rank", "time_range": "last_30_days", "points": [], "delta_vs_previous_period": 0},
+            "top_keywords_table": selected_cluster["top_keywords"] if selected_cluster else [],
+            "insight_note": selected_cluster["insight_note"] if selected_cluster else "Chưa có cụm phù hợp với bộ lọc hiện tại.",
+        }
+        total_volume = sum(item["volume"] for item in relevant_rows)
+        return {
+            "dates": dates,
+            "current_date": current_date,
+            "baseline_date": baseline_date,
+            "selected_main_cluster": selected_group,
+            "main_clusters": groups,
+            "available_tags": available_tags,
+            "cluster_overview": {
+                "main_cluster": selected_group,
+                "total_keywords": len(relevant_rows),
+                "total_volume": total_volume,
+                "generated_at": now_iso(),
+            },
+            "cluster_list": cluster_list,
+            "trend_panel": trend_panel,
+            "drilldown_tables": drilldown_tables,
+        }
+
     def get_overview(self, project_id: int) -> dict[str, Any]:
         project = self.get_project(project_id)
         projects = self.list_projects()
@@ -772,74 +1186,35 @@ class DashboardService:
         current_date: str | None = None,
         baseline_date: str | None = None,
         status_filter: str = "all",
+        main_cluster: str | None = None,
+        tag_filter: str = "all",
+        sort_by: str = "health_score",
     ) -> dict[str, Any]:
-        keywords = self._load_keywords_with_history(project_id)
         dates = self.get_project_dates(project_id)
         if not dates:
-            return {"groups": [], "dates": [], "baseline_date": None, "current_date": None}
+            return {
+                "dates": [],
+                "current_date": None,
+                "baseline_date": None,
+                "selected_main_cluster": None,
+                "main_clusters": [],
+                "available_tags": [],
+                "cluster_overview": None,
+                "cluster_list": [],
+                "trend_panel": None,
+                "drilldown_tables": [],
+            }
         current_date = current_date or dates[-1]
         baseline_date = baseline_date or (dates[-2] if len(dates) >= 2 else dates[0])
-        groups: dict[str, dict[str, Any]] = {}
-        timeline_peak = self.get_overview(project_id)["timeline"]
-        for keyword in keywords:
-            current_rank = self._history_position(keyword["history"], current_date)
-            if current_rank is None:
-                continue
-            previous_rank = self._history_previous_position(keyword["history"], current_date)
-            baseline_rank = self._history_position(keyword["history"], baseline_date)
-            delta_prev = None if previous_rank is None else round(float(current_rank - previous_rank), 2)
-            delta_baseline = None if baseline_rank is None else round(float(current_rank - baseline_rank), 2)
-            tags = self._keyword_tags(keyword["history"], int(keyword.get("kpi_target") or 10), current_date)
-            if status_filter != "all" and status_filter not in tags:
-                continue
-            progress = min(100, round((int(keyword.get("kpi_target") or 10) / max(current_rank, 1)) * 100, 1))
-            group_name = keyword.get("group_name") or "Chưa phân nhóm"
-            entry = groups.setdefault(
-                group_name,
-                {
-                    "name": group_name,
-                    "kpi_target": int(keyword.get("kpi_target") or 10),
-                    "keywords": [],
-                },
-            )
-            entry["keywords"].append(
-                {
-                    "id": keyword["id"],
-                    "keyword": keyword["keyword"],
-                    "cluster_name": keyword.get("cluster_name") or group_name,
-                    "sub_cluster_name": keyword.get("sub_cluster_name") or "",
-                    "search_volume": keyword.get("search_volume"),
-                    "current_rank": current_rank,
-                    "baseline_rank": baseline_rank,
-                    "best_rank": keyword.get("best_rank"),
-                    "delta_prev": delta_prev,
-                    "delta_baseline": delta_baseline,
-                    "progress": progress,
-                    "kpi_target": int(keyword.get("kpi_target") or 10),
-                    "tags": tags,
-                    "client_badge": client_rank_badge(current_rank),
-                }
-            )
-        for group_name, entry in groups.items():
-            entry["keywords"].sort(key=lambda item: (item["current_rank"], item["keyword"].lower()))
-            entry["keyword_count"] = len(entry["keywords"])
-            entry["achieved"] = sum(1 for item in entry["keywords"] if item["current_rank"] <= item["kpi_target"])
-            peaks = [timeline_item["groups"].get(group_name, 0) for timeline_item in timeline_peak]
-            if peaks:
-                peak_value = max(peaks)
-                peak_index = peaks.index(peak_value)
-                peak_label = format_date_label(timeline_peak[peak_index]["date"])
-            else:
-                peak_value = 0
-                peak_label = "-"
-            entry["peak_info"] = f"Đỉnh {peak_value}/{entry['keyword_count']} đạt KPI vào {peak_label}"
-        ordered_groups = [groups[name] for name in sorted(groups)]
-        return {
-            "groups": ordered_groups,
-            "dates": dates,
-            "current_date": current_date,
-            "baseline_date": baseline_date,
-        }
+        return self._build_cluster_view(
+            project_id,
+            current_date=current_date,
+            baseline_date=baseline_date,
+            selected_group=main_cluster,
+            status_filter=status_filter,
+            tag_filter=tag_filter,
+            sort_by=sort_by,
+        )
 
     def get_keyword_table(self, project_id: int, filters: dict[str, Any]) -> dict[str, Any]:
         keywords = self._load_keywords_with_history(project_id)
@@ -1047,13 +1422,32 @@ class DashboardService:
                 )
         return self._load_events(project_id)
 
-    def generate_weekly_summary(self, project_id: int) -> dict[str, Any]:
+    def save_weekly_note(self, project_id: int, content: str) -> dict[str, Any]:
+        dates = self.get_project_dates(project_id)
+        insight_date = dates[-1] if dates else now_iso().split("T")[0]
+        note = content.strip()
+        if not note:
+            raise ValueError("Nội dung nhận xét không được để trống.")
+        with transaction() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO ai_insights (
+                    project_id, insight_date, insight_type, cluster_name, keyword, content_vi, generated_at
+                )
+                VALUES (?, ?, 'weekly_summary', NULL, NULL, ?, ?)
+                """,
+                (project_id, insight_date, note, now_iso()),
+            )
+            row = connection.execute("SELECT * FROM ai_insights WHERE id = ?", (int(cursor.lastrowid),)).fetchone()
+        return dict(row)
+
+    def generate_weekly_summary(self, project_id: int, *, force: bool = True) -> dict[str, Any]:
         dates = self.get_project_dates(project_id)
         if not dates:
             raise ValueError("Project chưa có dữ liệu để tạo insight.")
         latest_date = dates[-1]
         existing = self._load_latest_insights(project_id).get("weekly_summary")
-        if existing and existing["insight_date"] == latest_date:
+        if existing and existing["insight_date"] == latest_date and not force:
             return existing
         previous_date = dates[-2] if len(dates) >= 2 else None
         keywords = self._load_keywords_with_history(project_id)
@@ -1234,4 +1628,3 @@ class DashboardService:
             except Exception:
                 continue
         return refreshed
-

@@ -82,11 +82,11 @@ export function deleteProject(token, projectId) {
   return request(`/api/projects/${projectId}`, { token, method: "DELETE" });
 }
 
-export function testGoogleSheet(token, sheetUrl) {
+export function testGoogleSheet(token, sheetUrl, sheetGid = "") {
   return request("/api/projects/test-sheet", {
     token,
     method: "POST",
-    body: { sheet_url: sheetUrl },
+    body: { sheet_url: sheetUrl, sheet_gid: sheetGid || null },
   });
 }
 
@@ -158,6 +158,14 @@ export function createWeeklyInsight(token, projectId) {
   return request(`/api/projects/${projectId}/insights/weekly`, { token, method: "POST" });
 }
 
+export function saveWeeklyNote(token, projectId, content) {
+  return request(`/api/projects/${projectId}/insights/weekly-note`, {
+    token,
+    method: "POST",
+    body: { content },
+  });
+}
+
 export function createClusterInsight(token, projectId, clusterName) {
   return request(`/api/projects/${projectId}/insights/cluster`, {
     token,
@@ -188,4 +196,3 @@ export async function exportKeywords(token, projectId, params) {
   anchor.click();
   URL.revokeObjectURL(url);
 }
-

@@ -23,6 +23,7 @@ export default function SettingsPanel({
     name: "",
     source_name: "",
     sheet_url: "",
+    sheet_gid: "",
     refresh_interval_minutes: 30,
     anthropic_api_key: "",
     clusters: [],
@@ -34,6 +35,7 @@ export default function SettingsPanel({
       name: settings?.project?.name || "",
       source_name: settings?.project?.source_name || "",
       sheet_url: settings?.project?.sheet_url || "",
+      sheet_gid: settings?.project?.sheet_gid || "",
       refresh_interval_minutes: settings?.project?.refresh_interval_minutes || 30,
       anthropic_api_key: settings?.project?.anthropic_api_key || "",
       clusters: (settings?.clusters || []).map((cluster) => ({ ...cluster })),
@@ -48,7 +50,7 @@ export default function SettingsPanel({
       <div className="absolute right-0 top-0 h-full w-full max-w-3xl overflow-y-auto border-l border-white/10 bg-[#0b121b]/96 px-6 py-6">
         <div className="flex items-start justify-between gap-4">
           <div>
-            <p className="text-xs uppercase tracking-[0.3em] text-neon-cyan">Settings</p>
+            <p className="text-xs uppercase tracking-[0.3em] text-neon-cyan">Cài đặt</p>
             <h2 className="mt-2 text-3xl font-bold text-white">Cài đặt dữ liệu & KPI</h2>
             <p className="mt-2 text-sm text-slate-400">
               Kết nối Google Sheets, tải file Excel/CSV, cấu hình KPI theo cụm và bật AI insight.
@@ -83,7 +85,7 @@ export default function SettingsPanel({
           {project ? (
             <>
               <section className="rounded-[32px] border border-white/10 bg-white/[0.03] p-5">
-                <p className="text-sm font-semibold text-white">Google Sheets live pull</p>
+                <p className="text-sm font-semibold text-white">Google Sheets / link dữ liệu public</p>
                 <div className="mt-4 grid gap-4">
                   <input
                     className="input-dark"
@@ -101,9 +103,15 @@ export default function SettingsPanel({
                     className="input-dark"
                     value={form.sheet_url}
                     onChange={(event) => setForm({ ...form, sheet_url: event.target.value })}
-                    placeholder="Dán Google Sheet URL public"
+                    placeholder="Dán Google Sheet URL, CSV link hoặc XLSX/XLS link public"
                   />
-                  <div className="grid gap-3 md:grid-cols-[1fr,220px]">
+                  <div className="grid gap-3 md:grid-cols-[1fr,220px,220px]">
+                    <input
+                      className="input-dark"
+                      value={form.sheet_gid}
+                      onChange={(event) => setForm({ ...form, sheet_gid: event.target.value })}
+                      placeholder="GID tab (nếu có nhiều tab)"
+                    />
                     <select
                       className="input-dark"
                       value={form.refresh_interval_minutes}
@@ -114,10 +122,15 @@ export default function SettingsPanel({
                       <option value={60}>1 giờ</option>
                       <option value={999999}>Chỉ cập nhật thủ công</option>
                     </select>
-                    <button className="button-secondary" type="button" onClick={() => onTestSheet(form.sheet_url)} disabled={testingSheet || !form.sheet_url.trim()}>
-                      {testingSheet ? "Đang kiểm tra..." : "Test connection"}
+                    <button className="button-secondary" type="button" onClick={() => onTestSheet(form.sheet_url, form.sheet_gid)} disabled={testingSheet || !form.sheet_url.trim()}>
+                      {testingSheet ? "Đang kiểm tra..." : "Kiểm tra kết nối"}
                     </button>
                   </div>
+                  <p className="text-sm leading-6 text-slate-400">
+                    Nếu file Google Sheets có nhiều tab, hãy mở đúng tab rồi copy URL để lấy đúng <span className="text-white">gid</span>,
+                    hoặc nhập gid thủ công ở ô trên. Với link public CSV/XLSX/XLS, hệ thống sẽ tự thử nhận diện tab/bảng có cột
+                    keyword, volume và các cột ngày ranking.
+                  </p>
                 </div>
               </section>
 
@@ -134,7 +147,7 @@ export default function SettingsPanel({
               </section>
 
               <section className="rounded-[32px] border border-white/10 bg-white/[0.03] p-5">
-                <p className="text-sm font-semibold text-white">Claude API key (optional)</p>
+                <p className="text-sm font-semibold text-white">Claude API key (tuỳ chọn)</p>
                 <input
                   className="input-dark mt-3"
                   value={form.anthropic_api_key}
@@ -205,4 +218,3 @@ export default function SettingsPanel({
     </div>
   );
 }
-

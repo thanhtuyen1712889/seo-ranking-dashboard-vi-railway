@@ -13,6 +13,8 @@ export default function KeywordTableTab({
     return null;
   }
 
+  const currentDate = data.current_date || data.dates[data.dates.length - 1];
+
   return (
     <div className="space-y-6">
       <div className="panel-grid">
@@ -69,12 +71,17 @@ export default function KeywordTableTab({
 
         <div className="mt-4 flex flex-wrap gap-3">
           <button className="button-secondary" type="button" onClick={onExport} disabled={exporting}>
-            {exporting ? "Đang xuất..." : "Download filtered view as Excel"}
+            {exporting ? "Đang xuất..." : "Tải view đã lọc xuống Excel"}
           </button>
         </div>
       </div>
 
       <div className="panel-grid overflow-hidden p-0">
+        <div className="flex flex-wrap items-center gap-3 border-b border-white/10 px-5 py-4 text-sm text-slate-400">
+          <span className="chip border-neon-cyan/30 bg-neon-cyan/10 text-neon-cyan">Ngày hiện tại: {formatDateLabel(currentDate)}</span>
+          <span className="chip">Ngày quá khứ: các cột nằm bên trái</span>
+          <span>Cột <span className="font-semibold text-white">Thay đổi</span> đã được kéo sát trước dải ngày để đọc nhanh hơn.</span>
+        </div>
         <div className="overflow-x-auto">
           <table className="min-w-full border-separate border-spacing-0 text-sm">
             <thead className="sticky top-0 z-10 bg-[#0f1723]">
@@ -84,12 +91,15 @@ export default function KeywordTableTab({
                 <th className="border-b border-white/10 px-4 py-3 text-left font-semibold text-slate-400">Keyword</th>
                 {mode === "team" ? <th className="border-b border-white/10 px-4 py-3 text-left font-semibold text-slate-400">Vol</th> : null}
                 {mode === "team" ? <th className="border-b border-white/10 px-4 py-3 text-left font-semibold text-slate-400">Best Rank</th> : null}
+                <th className="border-b border-white/10 px-4 py-3 text-left font-semibold text-slate-400">Thay Đổi</th>
                 {data.dates.map((date) => (
-                  <th key={date} className="border-b border-white/10 px-3 py-3 text-center font-semibold text-slate-400">
+                  <th
+                    key={date}
+                    className={`border-b px-3 py-3 text-center font-semibold ${date === currentDate ? "border-neon-cyan/35 bg-neon-cyan/6 text-neon-cyan" : "border-white/10 text-slate-400"}`}
+                  >
                     {formatDateLabel(date)}
                   </th>
                 ))}
-                <th className="border-b border-white/10 px-4 py-3 text-left font-semibold text-slate-400">Thay Đổi</th>
                 <th className="border-b border-white/10 px-4 py-3 text-left font-semibold text-slate-400">KPI Status</th>
               </tr>
             </thead>
@@ -106,10 +116,11 @@ export default function KeywordTableTab({
                   </td>
                   {mode === "team" ? <td className="border-b border-white/5 px-4 py-4 text-slate-300">{row.search_volume || "—"}</td> : null}
                   {mode === "team" ? <td className="border-b border-white/5 px-4 py-4 text-slate-300">{formatRank(row.best_rank)}</td> : null}
+                  <td className={`border-b border-white/5 px-4 py-4 font-bold ${deltaTone(row.delta_prev)}`}>{formatDelta(row.delta_prev)}</td>
                   {data.dates.map((date) => {
                     const rank = row.positions[date];
                     return (
-                      <td key={`${row.id}-${date}`} className="border-b border-white/5 px-2 py-4 text-center">
+                      <td key={`${row.id}-${date}`} className={`border-b border-white/5 px-2 py-4 text-center ${date === currentDate ? "bg-neon-cyan/4" : ""}`}>
                         {mode === "client" ? (
                           <span className="text-xs text-slate-300">{row.client_badge}</span>
                         ) : (
@@ -120,7 +131,6 @@ export default function KeywordTableTab({
                       </td>
                     );
                   })}
-                  <td className={`border-b border-white/5 px-4 py-4 font-bold ${deltaTone(row.delta_prev)}`}>{formatDelta(row.delta_prev)}</td>
                   <td className="border-b border-white/5 px-4 py-4 text-white">{row.kpi_status}</td>
                 </tr>
               ))}
@@ -131,4 +141,3 @@ export default function KeywordTableTab({
     </div>
   );
 }
-

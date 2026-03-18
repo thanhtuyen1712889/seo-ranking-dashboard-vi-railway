@@ -133,8 +133,8 @@ def delete_project(project_id: int, _: dict[str, Any] = Depends(require_auth)) -
 def test_sheet(payload: dict[str, Any] = Body(default={}), _: dict[str, Any] = Depends(require_auth)) -> dict[str, Any]:
     sheet_url = (payload.get("sheet_url") or "").strip()
     if not sheet_url:
-        raise HTTPException(status_code=400, detail="Vui lòng nhập Google Sheet URL.")
-    return service.test_google_sheet(sheet_url)
+        raise HTTPException(status_code=400, detail="Vui lòng nhập link dữ liệu public.")
+    return service.test_google_sheet(sheet_url, payload.get("sheet_gid"))
 
 
 @app.post("/api/projects/{project_id}/upload")
@@ -163,6 +163,9 @@ def group_view(
     current_date: str | None = Query(default=None),
     baseline_date: str | None = Query(default=None),
     status: str = Query(default="all"),
+    main_cluster: str | None = Query(default=None),
+    tag: str = Query(default="all"),
+    sort_by: str = Query(default="health_score"),
     _: dict[str, Any] = Depends(require_auth),
 ) -> dict[str, Any]:
     return service.get_group_view(
@@ -170,6 +173,9 @@ def group_view(
         current_date=current_date,
         baseline_date=baseline_date,
         status_filter=status,
+        main_cluster=main_cluster,
+        tag_filter=tag,
+        sort_by=sort_by,
     )
 
 
@@ -250,7 +256,16 @@ def recluster(project_id: int, _: dict[str, Any] = Depends(require_auth)) -> dic
 
 @app.post("/api/projects/{project_id}/insights/weekly")
 def weekly_insight(project_id: int, _: dict[str, Any] = Depends(require_auth)) -> dict[str, Any]:
-    return service.generate_weekly_summary(project_id)
+    return service.generate_weekly_summary(project_id, force=True)
+
+
+@app.post("/api/projects/{project_id}/insights/weekly-note")
+def save_weekly_note(
+    project_id: int,
+    payload: dict[str, Any] = Body(default={}),
+    _: dict[str, Any] = Depends(require_auth),
+) -> dict[str, Any]:
+    return service.save_weekly_note(project_id, payload.get("content") or "")
 
 
 @app.post("/api/projects/{project_id}/insights/cluster")

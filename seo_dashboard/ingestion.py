@@ -58,6 +58,7 @@ class ParsedRankingRow:
 class ParsedSheet:
     source_name: str
     header_row_index: int
+    selected_sheet_name: str | None
     kpi_map: dict[str, int]
     target_keyword_map: dict[str, int]
     rows: list[ParsedRankingRow]
@@ -360,14 +361,55 @@ def detect_header_row(frame: pd.DataFrame, max_rows: int = 20) -> int:
     return best_index
 
 
-def _read_raw_frame(filename: str, payload: bytes) -> tuple[pd.DataFrame, str]:
+def _sheet_candidate_score(frame: pd.DataFrame) -> tuple[int, int, int]:
+    normalized_frame = frame.dropna(axis=1, how="all")
+    if normalized_frame.empty:
+        return (-1, 0, 0)
+    header_row_index = detect_header_row(normalized_frame)
+    header_values = normalized_frame.iloc[header_row_index].tolist()
+    headers = _make_unique_headers(header_values)
+    keyword_column = _best_header_match(headers, KEYWORD_ALIASES)
+    group_column = _best_header_match(headers, GROUP_ALIASES)
+    volume_column = _best_header_match(headers, VOLUME_ALIASES)
+    date_columns = detect_date_columns(headers)
+    populated_rows = 0
+    for row_index in range(header_row_index + 1, min(len(normalized_frame), header_row_index + 31)):
+        row_values = normalized_frame.iloc[row_index].tolist()
+        if any(clean_text(value) for value in row_values):
+            populated_rows += 1
+    score = 0
+    if keyword_column:
+        score += 80
+    if group_column:
+        score += 10
+    if volume_column:
+        score += 4
+    score += min(len(date_columns), 12) * 7
+    score += min(populated_rows, 10)
+    return (score, -header_row_index, len(date_columns))
+
+
+def _read_raw_frame(filename: str, payload: bytes) -> tuple[pd.DataFrame, str, str | None]:
     suffix = Path(filename).suffix.lower()
     if suffix == ".csv":
         frame = pd.read_csv(io.BytesIO(payload), header=None)
-        return frame, "csv"
+        return frame, "csv", None
     if suffix in {".xlsx", ".xls"}:
-        frame = pd.read_excel(io.BytesIO(payload), header=None)
-        return frame, "excel"
+        sheets = pd.read_excel(io.BytesIO(payload), sheet_name=None, header=None)
+        if not sheets:
+            raise ValueError("File Excel không có sheet nào để đọc.")
+        best_sheet_name = None
+        best_frame = None
+        best_score = (-1, 0, 0)
+        for sheet_name, frame in sheets.items():
+            score = _sheet_candidate_score(frame)
+            if score > best_score:
+                best_score = score
+                best_sheet_name = sheet_name
+                best_frame = frame
+        if best_frame is None:
+            best_sheet_name, best_frame = next(iter(sheets.items()))
+        return best_frame, "excel", best_sheet_name
     raise ValueError("Định dạng file chưa được hỗ trợ.")
 
 
@@ -389,7 +431,7 @@ def _extract_summary_kpis(frame: pd.DataFrame, header_row_index: int) -> tuple[d
 
 
 def parse_spreadsheet_payload(filename: str, payload: bytes, source_name: str | None = None) -> ParsedSheet:
-    raw_frame, _ = _read_raw_frame(filename, payload)
+    raw_frame, _, selected_sheet_name = _read_raw_frame(filename, payload)
     raw_frame = raw_frame.dropna(axis=1, how="all")
     header_row_index = detect_header_row(raw_frame)
     kpi_map, target_keyword_map = _extract_summary_kpis(raw_frame, header_row_index)
@@ -454,6 +496,7 @@ def parse_spreadsheet_payload(filename: str, payload: bytes, source_name: str | 
     return ParsedSheet(
         source_name=source_name or filename,
         header_row_index=header_row_index,
+        selected_sheet_name=selected_sheet_name,
         kpi_map=kpi_map,
         target_keyword_map=target_keyword_map,
         rows=rows,
@@ -462,18 +505,66 @@ def parse_spreadsheet_payload(filename: str, payload: bytes, source_name: str | 
     )
 
 
-def extract_google_sheet_identifiers(sheet_url: str) -> tuple[str, str | None]:
+def _extract_query_or_fragment_gid(sheet_url: str) -> str | None:
+    parsed = urlparse(sheet_url)
+    query = parse_qs(parsed.query)
+    gid = query.get("gid", [None])[0]
+    if gid:
+        return gid
+    fragment_match = re.search(r"gid=([0-9]+)", parsed.fragment or "")
+    if fragment_match:
+        return fragment_match.group(1)
+    return None
+
+
+def extract_google_sheet_identifiers(sheet_url: str, preferred_gid: str | None = None) -> tuple[str, str | None]:
     match = re.search(r"/spreadsheets/d/([a-zA-Z0-9-_]+)", sheet_url)
     if not match:
         raise ValueError("Google Sheet URL không hợp lệ.")
     sheet_id = match.group(1)
-    parsed = urlparse(sheet_url)
-    query = parse_qs(parsed.query)
-    gid = query.get("gid", [None])[0]
-    if not gid and "gid=" in parsed.fragment:
-        fragment_query = parse_qs(parsed.fragment.split("?", 1)[0].replace("#", ""))
-        gid = fragment_query.get("gid", [None])[0]
+    gid = (preferred_gid or "").strip() or _extract_query_or_fragment_gid(sheet_url)
     return sheet_id, gid
+
+
+def _is_google_sheet_url(source_url: str) -> bool:
+    parsed = urlparse(source_url)
+    return "docs.google.com" in parsed.netloc and "/spreadsheets/" in parsed.path
+
+
+def _extract_google_drive_file_id(source_url: str) -> str | None:
+    patterns = [
+        r"/file/d/([a-zA-Z0-9_-]+)",
+        r"[?&]id=([a-zA-Z0-9_-]+)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, source_url)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _extension_from_content_type(content_type: str) -> str:
+    normalized = content_type.lower()
+    if "csv" in normalized:
+        return ".csv"
+    if "spreadsheetml" in normalized or "excel" in normalized:
+        return ".xlsx"
+    return ""
+
+
+def _filename_from_response(url: str, response: requests.Response, fallback_stem: str) -> str:
+    content_disposition = response.headers.get("content-disposition", "")
+    filename_match = re.search(r'filename="?([^";]+)"?', content_disposition)
+    if filename_match:
+        filename = filename_match.group(1).strip()
+        if Path(filename).suffix.lower() in {".csv", ".xlsx", ".xls"}:
+            return filename
+    parsed = urlparse(url)
+    path_name = Path(parsed.path).name
+    if Path(path_name).suffix.lower() in {".csv", ".xlsx", ".xls"}:
+        return path_name
+    extension = _extension_from_content_type(response.headers.get("content-type", ""))
+    return f"{fallback_stem}{extension or '.xlsx'}"
 
 
 def _download_bytes(url: str) -> tuple[bytes, str]:
@@ -484,8 +575,8 @@ def _download_bytes(url: str) -> tuple[bytes, str]:
     return response.content, content_type
 
 
-def fetch_google_sheet(sheet_url: str) -> tuple[bytes, str, str | None]:
-    sheet_id, gid = extract_google_sheet_identifiers(sheet_url)
+def fetch_google_sheet(sheet_url: str, preferred_gid: str | None = None) -> tuple[bytes, str, str | None]:
+    sheet_id, gid = extract_google_sheet_identifiers(sheet_url, preferred_gid=preferred_gid)
     csv_candidates = []
     if gid:
         csv_candidates.append(
@@ -517,3 +608,34 @@ def fetch_google_sheet(sheet_url: str) -> tuple[bytes, str, str | None]:
         return payload, "google-sheet.xlsx", gid
     except Exception as exc:  # pragma: no cover - network dependent
         raise ValueError(str(last_error or exc)) from exc
+
+
+def fetch_public_data_source(source_url: str, preferred_gid: str | None = None) -> tuple[bytes, str, str | None, str]:
+    normalized_url = source_url.strip()
+    if not normalized_url:
+        raise ValueError("Vui lòng nhập link dữ liệu public.")
+    if _is_google_sheet_url(normalized_url):
+        payload, filename, gid = fetch_google_sheet(normalized_url, preferred_gid=preferred_gid)
+        return payload, filename, gid, "google_sheet"
+
+    drive_file_id = _extract_google_drive_file_id(normalized_url)
+    download_url = normalized_url
+    fallback_stem = "remote-source"
+    if drive_file_id and "drive.google.com" in normalized_url:
+        download_url = f"https://drive.google.com/uc?export=download&id={drive_file_id}"
+        fallback_stem = "google-drive-file"
+
+    response = requests.get(download_url, timeout=45, allow_redirects=True)
+    if response.status_code >= 400:
+        raise ValueError(f"Không tải được dữ liệu từ link public ({response.status_code}).")
+    filename = _filename_from_response(normalized_url, response, fallback_stem)
+    suffix = Path(filename).suffix.lower()
+    content_type = (response.headers.get("content-type") or "").lower()
+    is_supported = suffix in {".csv", ".xlsx", ".xls"} or any(
+        token in content_type for token in ("csv", "spreadsheetml", "excel")
+    )
+    if not is_supported:
+        raise ValueError(
+            "Link hiện chưa phải Google Sheet public hoặc file CSV/XLSX/XLS tải trực tiếp."
+        )
+    return response.content, filename, None, "public_link"

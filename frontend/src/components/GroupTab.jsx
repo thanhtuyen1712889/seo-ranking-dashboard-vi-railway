@@ -1,41 +1,118 @@
-import { createClusterInsight } from "../lib/api";
-import { deltaTone, formatDelta, formatRank, rankTone } from "../lib/format";
+import { useEffect, useState } from "react";
+import {
+  CartesianGrid,
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
+import { formatDateLabel, formatDelta, formatRank } from "../lib/format";
 
-export default function GroupTab({
-  token,
-  projectId,
-  data,
-  filters,
-  setFilters,
-  mode,
-  onInsightCreated,
-  setToast,
-}) {
-  if (!data?.groups?.length) {
+const priorityTone = {
+  "Rising & strong": "border-neon-green/30 bg-neon-green/12 text-neon-green",
+  "Rising & opportunity": "border-neon-cyan/30 bg-neon-cyan/12 text-neon-cyan",
+  Declining: "border-neon-red/30 bg-neon-red/12 text-neon-red",
+  Stable: "border-white/10 bg-white/[0.04] text-slate-300",
+};
+
+const priorityDisplay = {
+  "Rising & strong": "Tăng mạnh và đang khỏe",
+  "Rising & opportunity": "Tăng và còn cơ hội",
+  Declining: "Đang giảm",
+  Stable: "Ổn định",
+};
+
+const trendTone = {
+  rising: "text-neon-green",
+  stable: "text-slate-300",
+  declining: "text-neon-red",
+};
+
+const trendLabel = {
+  rising: "Tăng",
+  stable: "Ổn định",
+  declining: "Giảm",
+};
+
+const trendArrow = {
+  rising: "↗",
+  stable: "→",
+  declining: "↘",
+};
+
+function clusterRowTone(priority) {
+  return priorityTone[priority] || priorityTone.Stable;
+}
+
+function currentRankLabel(value) {
+  if (!value) return "Chưa có";
+  if (value <= 5) return "Top 5";
+  if (value <= 10) return "Top 10";
+  if (value <= 20) return "Top 20";
+  return `Top ${Math.round(value)}`;
+}
+
+export default function GroupTab({ data, filters, setFilters, mode }) {
+  const [selectedClusterId, setSelectedClusterId] = useState("");
+  const [expandedClusterId, setExpandedClusterId] = useState("");
+  const [expandedSize, setExpandedSize] = useState({});
+
+  useEffect(() => {
+    if (!data) return;
+    if (!filters.main_cluster && data.selected_main_cluster) {
+      setFilters((previous) => ({ ...previous, main_cluster: data.selected_main_cluster }));
+    }
+  }, [data, filters.main_cluster, setFilters]);
+
+  useEffect(() => {
+    const defaultClusterId = data?.trend_panel?.selected_cluster_id || data?.cluster_list?.[0]?.cluster_id || "";
+    if (!defaultClusterId) {
+      setSelectedClusterId("");
+      setExpandedClusterId("");
+      return;
+    }
+    setSelectedClusterId((previous) => (data?.cluster_list?.some((item) => item.cluster_id === previous) ? previous : defaultClusterId));
+    setExpandedClusterId((previous) => (data?.cluster_list?.some((item) => item.cluster_id === previous) ? previous : defaultClusterId));
+  }, [data]);
+
+  if (!data?.cluster_list?.length) {
     return (
       <div className="panel-grid text-center">
-        <p className="text-lg font-semibold text-white">Chưa có dữ liệu theo bộ</p>
+        <p className="text-lg font-semibold text-white">Chưa có dữ liệu cluster insight</p>
+        <p className="mt-2 text-sm text-slate-400">
+          Hãy chọn bộ dữ liệu có ranking theo ngày hoặc nới bộ lọc hiện tại để xem panel insight.
+        </p>
       </div>
     );
   }
 
-  async function handleClusterInsight(clusterName) {
-    try {
-      const response = await createClusterInsight(token, projectId, clusterName);
-      setToast({ type: "success", message: response.content_vi || "Đã tạo insight cụm." });
-      onInsightCreated?.();
-    } catch (error) {
-      setToast({ type: "error", message: error.message });
-    }
+  const selectedCluster =
+    data.cluster_list.find((item) => item.cluster_id === selectedClusterId) ||
+    data.cluster_list[0];
+  const selectedDrilldown =
+    data.drilldown_tables.find((item) => item.cluster_id === selectedCluster?.cluster_id) || null;
+  const visibleKeywords = selectedDrilldown
+    ? selectedDrilldown.keywords.slice(0, expandedSize[selectedDrilldown.cluster_id] || 8)
+    : [];
+
+  function handleSelectCluster(clusterId) {
+    setSelectedClusterId(clusterId);
+    setExpandedClusterId((previous) => (previous === clusterId ? "" : clusterId));
   }
 
   return (
     <div className="space-y-6">
       <div className="panel-grid">
-        <div className="grid gap-3 xl:grid-cols-4">
+        <div className="grid gap-3 xl:grid-cols-6">
           <label className="text-sm font-semibold text-white">
-            Ngày xem hiện tại
-            <select className="input-dark mt-2" value={filters.current_date || ""} onChange={(event) => setFilters({ ...filters, current_date: event.target.value })}>
+            Ngày hiện tại
+            <select
+              className="input-dark mt-2"
+              value={filters.current_date || data.current_date || ""}
+              onChange={(event) => setFilters({ ...filters, current_date: event.target.value })}
+            >
               {data.dates.map((item) => (
                 <option key={item} value={item}>
                   {item}
@@ -46,7 +123,11 @@ export default function GroupTab({
 
           <label className="text-sm font-semibold text-white">
             So sánh với ngày
-            <select className="input-dark mt-2" value={filters.baseline_date || ""} onChange={(event) => setFilters({ ...filters, baseline_date: event.target.value })}>
+            <select
+              className="input-dark mt-2"
+              value={filters.baseline_date || data.baseline_date || ""}
+              onChange={(event) => setFilters({ ...filters, baseline_date: event.target.value })}
+            >
               {data.dates.map((item) => (
                 <option key={item} value={item}>
                   {item}
@@ -56,91 +137,306 @@ export default function GroupTab({
           </label>
 
           <label className="text-sm font-semibold text-white">
-            Chỉ hiển thị
-            <select className="input-dark mt-2" value={filters.status || "all"} onChange={(event) => setFilters({ ...filters, status: event.target.value })}>
-              <option value="all">Tất cả</option>
-              <option value="down">🔴 Giảm</option>
-              <option value="up">🟢 Tăng</option>
-              <option value="stable">⚪ Ổn định</option>
-              <option value="lost">⚠️ Ngoài top</option>
-              <option value="rising">🚀 Đang tăng mạnh</option>
-              <option value="declining">📉 Đang giảm</option>
+            Bộ chính
+            <select
+              className="input-dark mt-2"
+              value={filters.main_cluster || data.selected_main_cluster || ""}
+              onChange={(event) => setFilters({ ...filters, main_cluster: event.target.value })}
+            >
+              {data.main_clusters.map((item) => (
+                <option key={item} value={item}>
+                  {item}
+                </option>
+              ))}
             </select>
           </label>
 
-          <div className="rounded-[28px] border border-neon-cyan/20 bg-neon-cyan/5 px-4 py-4 text-sm text-slate-300">
-            <p className="font-semibold text-white">Dynamic tags</p>
-            <p className="mt-1">
-              Rising, Stable, Declining, Lost và milestone top 10/5/3 được tính tự động từ 3 mốc gần nhất.
-            </p>
-          </div>
+          <label className="text-sm font-semibold text-white">
+            Lọc tag
+            <select className="input-dark mt-2" value={filters.tag || "all"} onChange={(event) => setFilters({ ...filters, tag: event.target.value })}>
+              <option value="all">Tất cả tag</option>
+              {data.available_tags.map((tag) => (
+                <option key={tag} value={tag}>
+                  {tag}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label className="text-sm font-semibold text-white">
+            Xu hướng
+            <select className="input-dark mt-2" value={filters.status || "all"} onChange={(event) => setFilters({ ...filters, status: event.target.value })}>
+              <option value="all">Tất cả</option>
+              <option value="rising">Đang tăng</option>
+              <option value="stable">Ổn định</option>
+              <option value="declining">Đang giảm</option>
+            </select>
+          </label>
+
+          <label className="text-sm font-semibold text-white">
+            Sắp xếp
+            <select className="input-dark mt-2" value={filters.sort_by || "health_score"} onChange={(event) => setFilters({ ...filters, sort_by: event.target.value })}>
+              <option value="health_score">Điểm khỏe</option>
+              <option value="trend_strength">Độ mạnh xu hướng</option>
+              <option value="total_volume">Tổng volume</option>
+              <option value="avg_rank">Hạng trung bình</option>
+            </select>
+          </label>
         </div>
       </div>
 
-      {data.groups.map((group) => (
-        <section key={group.name} className="panel-grid">
-          <div className="flex flex-col gap-4 border-b border-white/10 pb-5 lg:flex-row lg:items-center lg:justify-between">
+      <div className="grid gap-6 xl:grid-cols-[1.65fr,0.95fr]">
+        <section className="panel-grid">
+          <div className="flex flex-col gap-3 border-b border-white/10 pb-5 lg:flex-row lg:items-end lg:justify-between">
             <div>
-              <p className="text-xs uppercase tracking-[0.3em] text-neon-blue">{group.name}</p>
-              <h2 className="mt-2 text-2xl font-bold text-white">
-                {group.name} · KPI Top{group.kpi_target} · {group.keyword_count}kw
+              <p className="text-xs uppercase tracking-[0.3em] text-neon-cyan">Danh sách cụm con</p>
+              <h2 className="mt-2 text-3xl font-bold text-white">
+                {data.cluster_overview?.main_cluster} · {data.cluster_overview?.total_keywords} keyword
               </h2>
               <p className="mt-2 text-sm text-slate-400">
-                Hiện {data.current_date}: {group.achieved}/{group.keyword_count}kw đạt KPI · {group.peak_info}
+                Tổng volume {data.cluster_overview?.total_volume?.toLocaleString("en-US") || 0} · Mặc định sắp theo cụm khỏe nhất để team sales và marketing nhìn thấy ưu tiên ngay.
               </p>
             </div>
-            <button className="button-secondary" type="button" onClick={() => handleClusterInsight(group.name)}>
-              Tạo insight cụm
-            </button>
+            <div className="flex flex-wrap gap-2">
+              <span className="chip border-neon-green/30 bg-neon-green/10 text-neon-green">Tăng mạnh và đang khỏe</span>
+              <span className="chip border-neon-cyan/30 bg-neon-cyan/10 text-neon-cyan">Tăng và còn cơ hội</span>
+              <span className="chip border-neon-red/30 bg-neon-red/10 text-neon-red">Đang giảm</span>
+              <span className="chip">Ổn định</span>
+            </div>
           </div>
 
           <div className="mt-5 space-y-3">
-            {group.keywords.map((item) => (
-              <div key={item.id} className="rounded-[28px] border border-white/10 bg-white/[0.03] px-4 py-4">
-                <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-                  <div className="min-w-0 flex-1">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <p className="truncate text-base font-semibold text-white">{item.keyword}</p>
-                      <span className="chip">{item.cluster_name}</span>
-                      {mode === "team" && item.search_volume ? <span className="chip">Vol {item.search_volume}</span> : null}
-                    </div>
-                    <p className="mt-2 text-sm text-slate-400">{item.sub_cluster_name}</p>
-                  </div>
+            {data.cluster_list.map((cluster) => {
+              const isSelected = cluster.cluster_id === selectedCluster?.cluster_id;
+              const isExpanded = cluster.cluster_id === expandedClusterId;
+              const limit = expandedSize[cluster.cluster_id] || 8;
+              const visibleRows = cluster.keywords.slice(0, limit);
+              return (
+                <div
+                  key={cluster.cluster_id}
+                  className={`rounded-[30px] border transition ${isSelected ? "border-neon-cyan/35 bg-neon-cyan/6 shadow-glow" : "border-white/10 bg-white/[0.03]"}`}
+                >
+                  <button
+                    className="w-full px-5 py-5 text-left"
+                    type="button"
+                    onClick={() => handleSelectCluster(cluster.cluster_id)}
+                  >
+                    <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-center gap-3">
+                          <h3 className="text-xl font-semibold text-white">{cluster.cluster_name}</h3>
+                          <span className={`rounded-full border px-3 py-1 text-xs font-semibold ${clusterRowTone(cluster.priority_label)}`}>
+                            {priorityDisplay[cluster.priority_label] || cluster.priority_label}
+                          </span>
+                        </div>
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          {cluster.tags.map((tag) => (
+                            <span key={`${cluster.cluster_id}-${tag}`} className="chip">
+                              #{tag}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
 
-                  <div className="flex w-full flex-col gap-3 lg:w-[420px]">
-                    <div className="flex items-center justify-between gap-3">
-                      {mode === "client" ? (
-                        <span className="rounded-full border border-white/10 px-4 py-2 text-sm font-semibold text-white">
-                          {item.client_badge}
-                        </span>
-                      ) : (
-                        <span className={`rounded-full border px-4 py-2 text-sm font-bold ${rankTone(item.current_rank)}`}>
-                          Top {formatRank(item.current_rank)}
-                        </span>
-                      )}
-                      <span className={`text-sm font-bold ${deltaTone(item.delta_prev)}`}>{formatDelta(item.delta_prev)}</span>
+                      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5 xl:text-right">
+                        <div>
+                          <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Keyword</p>
+                          <p className="mt-2 text-2xl font-bold text-white">{cluster.keyword_count}</p>
+                        </div>
+                        <div>
+                          <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Volume</p>
+                          <p className="mt-2 text-lg font-semibold text-white">{cluster.total_volume.toLocaleString("en-US")}</p>
+                        </div>
+                        <div>
+                          <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Hạng TB</p>
+                          <p className="mt-2 text-lg font-semibold text-white">{formatRank(cluster.avg_rank_current)}</p>
+                        </div>
+                        <div>
+                          <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Trend</p>
+                          <p className={`mt-2 text-lg font-semibold ${trendTone[cluster.trend_status]}`}>
+                            {trendArrow[cluster.trend_status]} {formatDelta(cluster.rank_delta)}
+                          </p>
+                        </div>
+                        <div>
+                          <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Điểm khỏe</p>
+                          <div className="mt-2">
+                            <div className="flex items-center justify-between text-sm font-semibold text-white">
+                              <span>{cluster.health_score}/100</span>
+                              <span className={trendTone[cluster.trend_status]}>{trendLabel[cluster.trend_status]}</span>
+                            </div>
+                            <div className="mt-2 h-2.5 overflow-hidden rounded-full bg-white/5">
+                              <div
+                                className={`h-full rounded-full ${cluster.trend_status === "declining" ? "bg-gradient-to-r from-neon-orange to-neon-red" : cluster.trend_status === "rising" ? "bg-gradient-to-r from-neon-green to-neon-cyan" : "bg-gradient-to-r from-slate-500 to-slate-300"}`}
+                                style={{ width: `${Math.max(cluster.health_score, 6)}%` }}
+                              />
+                            </div>
+                          </div>
+                        </div>
+                      </div>
                     </div>
+                  </button>
 
+                  {isExpanded ? (
+                    <div className="border-t border-white/10 bg-black/15 px-5 py-5">
+                      <div className="mb-4 flex items-center justify-between gap-3">
+                        <p className="text-sm font-semibold text-white">Drill-down keyword trong cụm</p>
+                        {cluster.keywords.length > visibleRows.length ? (
+                          <button
+                            className="button-secondary px-4 py-2 text-xs"
+                            type="button"
+                            onClick={() =>
+                              setExpandedSize((previous) => ({
+                                ...previous,
+                                [cluster.cluster_id]: previous[cluster.cluster_id] ? previous[cluster.cluster_id] + 6 : 14,
+                              }))
+                            }
+                          >
+                            Xem thêm
+                          </button>
+                        ) : null}
+                      </div>
+                      <div className="overflow-x-auto">
+                        <table className="min-w-full text-sm">
+                          <thead>
+                            <tr className="text-left text-slate-400">
+                              <th className="pb-3 pr-4 font-semibold">Keyword</th>
+                              <th className="pb-3 pr-4 font-semibold">Tags</th>
+                              <th className="pb-3 pr-4 font-semibold">Vol</th>
+                              <th className="pb-3 pr-4 font-semibold">Hiện tại</th>
+                              <th className="pb-3 pr-4 font-semibold">Thay đổi</th>
+                              <th className="pb-3 font-semibold">Trend</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {visibleRows.map((item) => (
+                              <tr key={`${cluster.cluster_id}-${item.keyword}`} className="border-t border-white/5 text-slate-200">
+                                <td className="py-3 pr-4">
+                                  <p className="font-medium text-white">{item.keyword}</p>
+                                </td>
+                                <td className="py-3 pr-4">
+                                  <div className="flex flex-wrap gap-2">
+                                    {item.tags.map((tag) => (
+                                      <span key={`${item.keyword}-${tag}`} className="chip">
+                                        {tag}
+                                      </span>
+                                    ))}
+                                  </div>
+                                </td>
+                                <td className="py-3 pr-4">{item.volume ? item.volume.toLocaleString("en-US") : "—"}</td>
+                                <td className="py-3 pr-4">{mode === "client" ? currentRankLabel(item.current_rank) : formatRank(item.current_rank)}</td>
+                                <td className={`py-3 pr-4 ${trendTone[item.trend_status]}`}>{formatDelta(item.rank_delta)}</td>
+                                <td className={`py-3 ${trendTone[item.trend_status]}`}>
+                                  {trendArrow[item.trend_status]} {trendLabel[item.trend_status]}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
+        </section>
+
+        <aside className="panel-grid">
+          <div className="border-b border-white/10 pb-5">
+            <p className="text-xs uppercase tracking-[0.3em] text-neon-blue">Bảng xu hướng</p>
+            <div className="mt-3 flex flex-wrap items-center gap-3">
+              <h2 className="text-2xl font-bold text-white">{selectedCluster.cluster_name}</h2>
+              <span className={`rounded-full border px-3 py-1 text-xs font-semibold ${clusterRowTone(selectedCluster.priority_label)}`}>
+                {priorityDisplay[selectedCluster.priority_label] || selectedCluster.priority_label}
+              </span>
+            </div>
+            <div className="mt-4 flex flex-wrap gap-2">
+              <span className="chip">Volume {selectedCluster.total_volume.toLocaleString("en-US")}</span>
+              <span className="chip">Hạng TB {formatRank(selectedCluster.avg_rank_current)}</span>
+              <span className="chip">Điểm khỏe {selectedCluster.health_score}</span>
+              <span className={`chip ${trendTone[selectedCluster.trend_status]}`}>{trendArrow[selectedCluster.trend_status]} {trendLabel[selectedCluster.trend_status]}</span>
+            </div>
+          </div>
+
+          <div className="mt-5">
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-sm font-semibold text-white">Sparkline 30 ngày</p>
+              <span className={`text-sm font-semibold ${selectedCluster.sparkline.delta_vs_previous_period >= 0 ? "text-neon-green" : "text-neon-red"}`}>
+                {selectedCluster.sparkline.delta_vs_previous_period >= 0 ? "+" : ""}
+                {selectedCluster.sparkline.delta_vs_previous_period}% vs kỳ trước
+              </span>
+            </div>
+            <div className="mt-3 h-[220px]">
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={selectedCluster.sparkline.points}>
+                  <CartesianGrid stroke="rgba(255,255,255,0.06)" vertical={false} />
+                  <XAxis dataKey="date" tickFormatter={formatDateLabel} stroke="#8b949e" tick={{ fontSize: 11 }} />
+                  <YAxis reversed stroke="#8b949e" tick={{ fontSize: 11 }} />
+                  <Tooltip
+                    labelFormatter={(value) => formatDateLabel(value)}
+                    formatter={(value) => [`${value}`, "Hạng trung bình"]}
+                    contentStyle={{
+                      background: "#11161f",
+                      border: "1px solid rgba(255,255,255,0.08)",
+                      borderRadius: 18,
+                    }}
+                  />
+                  <Line type="monotone" dataKey="value" stroke="#38bdf8" strokeWidth={3} dot={false} activeDot={{ r: 5 }} />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+
+          <div className="mt-5 rounded-[28px] border border-white/10 bg-white/[0.03] p-4">
+            <p className="text-sm font-semibold text-white">Insight ngắn cho cụm</p>
+            <p className="mt-3 text-sm leading-7 text-slate-300">{selectedCluster.insight_note}</p>
+          </div>
+
+          <div className="mt-5">
+            <div className="mb-3 flex items-center justify-between gap-3">
+              <p className="text-sm font-semibold text-white">Top keyword đại diện</p>
+              <span className="text-xs text-slate-500">Hiện tại so với mốc đối chiếu</span>
+            </div>
+            <div className="space-y-3">
+              {selectedCluster.top_keywords.map((item) => (
+                <div key={`${selectedCluster.cluster_id}-${item.keyword}`} className="rounded-[24px] border border-white/10 bg-white/[0.03] px-4 py-3">
+                  <div className="flex items-start justify-between gap-3">
                     <div>
-                      <div className="mb-2 flex items-center justify-between text-xs text-slate-500">
-                        <span>Tiến độ KPI Top {item.kpi_target}</span>
-                        <span>{Math.round(item.progress)}%</span>
-                      </div>
-                      <div className="h-3 overflow-hidden rounded-full bg-white/5">
-                        <div
-                          className={`h-full rounded-full ${item.current_rank <= item.kpi_target ? "bg-gradient-to-r from-neon-green to-neon-cyan" : "bg-gradient-to-r from-neon-orange to-neon-red"}`}
-                          style={{ width: `${item.progress}%` }}
-                        />
-                      </div>
+                      <p className="font-semibold text-white">{item.keyword}</p>
+                      <p className="mt-1 text-sm text-slate-400">Vol {item.volume ? item.volume.toLocaleString("en-US") : "—"}</p>
+                    </div>
+                    <div className="text-right">
+                      <p className="text-sm font-semibold text-white">
+                        {mode === "client" ? currentRankLabel(item.current_rank) : `Top ${formatRank(item.current_rank)}`}
+                      </p>
+                      <p className={`mt-1 text-sm font-semibold ${trendTone[item.trend_status]}`}>
+                        {trendArrow[item.trend_status]} {formatDelta(item.rank_delta)}
+                      </p>
                     </div>
                   </div>
                 </div>
-              </div>
-            ))}
+              ))}
+            </div>
+
+            {selectedDrilldown && selectedDrilldown.keywords.length > visibleKeywords.length ? (
+              <button
+                className="button-secondary mt-4 w-full"
+                type="button"
+                onClick={() =>
+                  setExpandedSize((previous) => ({
+                    ...previous,
+                    [selectedDrilldown.cluster_id]: previous[selectedDrilldown.cluster_id]
+                      ? previous[selectedDrilldown.cluster_id] + 6
+                      : 14,
+                  }))
+                }
+              >
+                Xem thêm keyword trong panel
+              </button>
+            ) : null}
           </div>
-        </section>
-      ))}
+        </aside>
+      </div>
     </div>
   );
 }
-

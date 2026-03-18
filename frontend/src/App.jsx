@@ -23,6 +23,7 @@ import {
   reclusterProject,
   refreshProject,
   saveKeywordNotes,
+  saveWeeklyNote,
   storeSession,
   testGoogleSheet,
   updateSettings,
@@ -67,6 +68,7 @@ export default function App() {
   const [savingSettings, setSavingSettings] = useState(false);
   const [creatingProject, setCreatingProject] = useState(false);
   const [generatingInsight, setGeneratingInsight] = useState(false);
+  const [savingWeeklyNote, setSavingWeeklyNote] = useState(false);
   const [addingEvent, setAddingEvent] = useState(false);
   const [dragActive, setDragActive] = useState(false);
   const [savingNotes, setSavingNotes] = useState(false);
@@ -83,6 +85,9 @@ export default function App() {
     current_date: "",
     baseline_date: "",
     status: "all",
+    main_cluster: "",
+    tag: "all",
+    sort_by: "health_score",
   });
   const [keywordFilters, setKeywordFilters] = useState({
     current_date: "",
@@ -136,7 +141,7 @@ export default function App() {
     getGroupView(token, selectedProjectId, groupFilters)
       .then(setGroupView)
       .catch((error) => setToast({ type: "error", message: error.message }));
-  }, [selectedProjectId, token, groupFilters.current_date, groupFilters.baseline_date, groupFilters.status]);
+  }, [selectedProjectId, token, groupFilters.current_date, groupFilters.baseline_date, groupFilters.status, groupFilters.main_cluster, groupFilters.tag, groupFilters.sort_by]);
 
   useEffect(() => {
     if (!selectedProjectId || !token || !keywordFilters.current_date) return;
@@ -323,17 +328,17 @@ export default function App() {
     }
   }
 
-  async function handleTestSheet(sheetUrl) {
+  async function handleTestSheet(sheetUrl, sheetGid = "") {
     if (!sheetUrl?.trim()) {
-      setToast({ type: "error", message: "Vui lòng nhập Google Sheet URL." });
+      setToast({ type: "error", message: "Vui lòng nhập link dữ liệu public." });
       return;
     }
     setTestingSheet(true);
     try {
-      const response = await testGoogleSheet(token, sheetUrl);
+      const response = await testGoogleSheet(token, sheetUrl, sheetGid);
       setToast({
         type: "success",
-        message: `Kết nối thành công. Tìm thấy ${response.row_count} keyword và ${response.dates.length} mốc ngày.`,
+        message: `Kết nối thành công. Tìm thấy ${response.row_count} keyword, ${response.dates.length} mốc ngày${response.selected_sheet_name ? ` · tab: ${response.selected_sheet_name}` : ""}.`,
       });
     } catch (error) {
       setToast({ type: "error", message: error.message });
@@ -368,6 +373,20 @@ export default function App() {
       setToast({ type: "error", message: error.message });
     } finally {
       setGeneratingInsight(false);
+    }
+  }
+
+  async function handleSaveWeeklyNote(content) {
+    if (!selectedProjectId) return;
+    setSavingWeeklyNote(true);
+    try {
+      await saveWeeklyNote(token, selectedProjectId, content);
+      await loadOverviewAndSettings(selectedProjectId);
+      setToast({ type: "success", message: "Đã lưu nhận xét tuần." });
+    } catch (error) {
+      setToast({ type: "error", message: error.message });
+    } finally {
+      setSavingWeeklyNote(false);
     }
   }
 
@@ -503,7 +522,7 @@ export default function App() {
 
               <div className="grid gap-3 sm:grid-cols-2 xl:w-[520px]">
                 <label className="rounded-[24px] border border-white/10 bg-black/10 px-4 py-3 text-sm font-semibold text-white">
-                  Project
+                  Dự án
                   <select
                     className="mt-2 w-full bg-transparent text-sm text-slate-200 outline-none"
                     value={selectedProjectId}
@@ -610,6 +629,8 @@ export default function App() {
             mode={mode}
             generatingInsight={generatingInsight}
             onGenerateInsight={handleGenerateWeeklyInsight}
+            onSaveWeeklyNote={handleSaveWeeklyNote}
+            savingWeeklyNote={savingWeeklyNote}
             manualEvent={manualEvent}
             setManualEvent={setManualEvent}
             onAddEvent={handleAddEvent}
@@ -641,16 +662,16 @@ export default function App() {
 
       <SettingsPanel
         open={settingsOpen}
-        project={project}
-        settings={settings}
-        uploading={uploading}
-        testingSheet={testingSheet}
-        saving={savingSettings}
+            project={project}
+            settings={settings}
+            uploading={uploading}
+            testingSheet={testingSheet}
+            saving={savingSettings}
         dragActive={dragActive}
         setDragActive={setDragActive}
-        onClose={() => setSettingsOpen(false)}
-        onSave={handleSaveSettings}
-        onTestSheet={handleTestSheet}
+            onClose={() => setSettingsOpen(false)}
+            onSave={handleSaveSettings}
+            onTestSheet={handleTestSheet}
         onUpload={handleUpload}
         onCreateProject={handleCreateProject}
         creatingProject={creatingProject}

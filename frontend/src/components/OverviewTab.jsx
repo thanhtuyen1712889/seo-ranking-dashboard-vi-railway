@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import {
   Bar,
   BarChart,
@@ -23,11 +24,21 @@ export default function OverviewTab({
   mode,
   generatingInsight,
   onGenerateInsight,
+  onSaveWeeklyNote,
+  savingWeeklyNote,
   manualEvent,
   setManualEvent,
   onAddEvent,
   addingEvent,
 }) {
+  const [editingNote, setEditingNote] = useState(false);
+  const [weeklyDraft, setWeeklyDraft] = useState("");
+
+  useEffect(() => {
+    setWeeklyDraft(overview?.latest_insight?.content_vi || "");
+    setEditingNote(false);
+  }, [overview?.latest_insight?.generated_at, overview?.latest_insight?.content_vi]);
+
   if (!overview?.dates?.length) {
     return (
       <div className="panel-grid text-center">
@@ -72,14 +83,42 @@ export default function OverviewTab({
       <div className={`rounded-[32px] border bg-gradient-to-br p-6 ${mode === "client" ? "border-neon-yellow/45 from-neon-yellow/18 to-neon-orange/8 shadow-warning" : "border-neon-yellow/30 from-neon-yellow/12 to-transparent shadow-warning"}`}>
         <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
           <div className="max-w-4xl">
-            <p className="text-xs uppercase tracking-[0.3em] text-neon-yellow">⚡ Nhận xét AI hàng tuần</p>
-            <p className={`mt-3 whitespace-pre-line text-slate-100 ${mode === "client" ? "text-lg leading-8" : "text-base leading-7"}`}>
-              {overview.latest_insight?.content_vi || "Chưa có insight tự động cho mốc dữ liệu hiện tại."}
+            <p className="text-xs uppercase tracking-[0.3em] text-neon-yellow">⚡ Nhận xét hàng tuần</p>
+            <textarea
+              className={`mt-3 min-h-36 w-full rounded-[24px] border border-white/10 bg-black/20 px-4 py-4 text-slate-100 outline-none ${mode === "client" ? "text-lg leading-8" : "text-base leading-7"} ${editingNote ? "ring-2 ring-neon-yellow/30" : ""}`}
+              value={weeklyDraft}
+              readOnly={!editingNote}
+              onChange={(event) => setWeeklyDraft(event.target.value)}
+              placeholder="Chưa có nhận xét cho mốc dữ liệu hiện tại."
+            />
+            <p className="mt-3 text-xs text-slate-400">
+              {overview.latest_insight?.generated_at
+                ? `Cập nhật ghi chú: ${formatDateTime(overview.latest_insight.generated_at)}`
+                : "Bạn có thể tự tạo nhận xét mới hoặc nhập ghi chú tay cho tuần này."}
             </p>
           </div>
-          <button className="button-secondary shrink-0" type="button" onClick={onGenerateInsight} disabled={generatingInsight}>
-            {generatingInsight ? "Đang tạo..." : "Tạo nhận xét mới"}
-          </button>
+          <div className="flex shrink-0 flex-wrap gap-3">
+            <button className="button-secondary" type="button" onClick={onGenerateInsight} disabled={generatingInsight}>
+              {generatingInsight ? "Đang tạo..." : "Tạo nhận xét mới"}
+            </button>
+            {editingNote ? (
+              <>
+                <button className="button-primary" type="button" onClick={() => onSaveWeeklyNote(weeklyDraft)} disabled={savingWeeklyNote || !weeklyDraft.trim()}>
+                  {savingWeeklyNote ? "Đang lưu..." : "Lưu nhận xét"}
+                </button>
+                <button className="button-secondary" type="button" onClick={() => {
+                  setWeeklyDraft(overview.latest_insight?.content_vi || "");
+                  setEditingNote(false);
+                }}>
+                  Hủy sửa
+                </button>
+              </>
+            ) : (
+              <button className="button-secondary" type="button" onClick={() => setEditingNote(true)}>
+                Chỉnh sửa tay
+              </button>
+            )}
+          </div>
         </div>
       </div>
 
@@ -278,4 +317,3 @@ export default function OverviewTab({
     </div>
   );
 }
-
