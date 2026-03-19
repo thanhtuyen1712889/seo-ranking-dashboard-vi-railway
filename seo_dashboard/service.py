@@ -16,9 +16,9 @@ from nltk.stem import PorterStemmer
 
 from .ai import (
     call_claude,
+    ensure_complete_weekly_range_note,
     fallback_cluster_pattern,
     fallback_keyword_insight,
-    fallback_weekly_range_note,
     fallback_weekly_summary,
 )
 from .auth import (
@@ -1748,26 +1748,34 @@ class DashboardService:
         prompt = (
             "Bạn là SEO analyst đang đọc dữ liệu từ dashboard SEO.\n"
             f"Dữ liệu hiện tại: {data_payload}\n"
-            "Hãy viết nhận xét bằng tiếng Việt, ngắn gọn, bám sát dữ liệu và chia đúng 3 phần:\n"
-            "Tổng quan:\n"
-            "- 1-2 câu tóm tắt toàn cảnh trong khoảng ngày đang chọn.\n"
-            "Các điểm sáng:\n"
-            "- Phải nhắc đủ từng cluster chính trong dữ liệu (ví dụ B2B, M2 Extensions, SEO).\n"
-            "- Với mỗi cluster chính, nêu rõ sub-cluster đang sáng nhất.\n"
+            "Hãy viết nhận xét bằng tiếng Việt, ngắn gọn, bám sát dữ liệu và xuất đúng format sau:\n"
+            "**Tổng quan**\n"
+            "- ...\n"
+            "- ...\n"
+            "\n"
+            "**Các điểm sáng**\n"
+            "- **B2B**: ...\n"
+            "- **M2 Extensions**: ...\n"
+            "- **SEO**: ...\n"
+            "\n"
+            "**Các điểm cần chú ý**\n"
+            "- **B2B**: ...\n"
+            "- **M2 Extensions**: ...\n"
+            "- **SEO**: ...\n"
+            "\n"
+            "Quy tắc nội dung:\n"
+            "- Phải nhắc đủ từng cluster chính trong dữ liệu, không bỏ sót cluster nào.\n"
+            "- Với mỗi cluster chính, nêu rõ sub-cluster sáng nhất và sub-cluster cần theo dõi nhất.\n"
             "- Nếu nói tăng/phục hồi thì cố gắng ghi rõ từ top nào lên top nào, từ ngày nào đến ngày nào.\n"
-            "- Nếu có thể, thêm 1 trường hợp đặc biệt là keyword hiệu suất tốt.\n"
-            "Các điểm cần chú ý:\n"
-            "- Cũng phải nhắc đủ từng cluster chính.\n"
-            "- Với mỗi cluster chính, nêu sub-cluster cần theo dõi nhất.\n"
             "- Nếu nói giảm thì cố gắng ghi rõ từ top nào xuống top nào, từ ngày nào đến ngày nào.\n"
-            "- Nếu có thể, thêm 1 trường hợp đặc biệt là keyword giảm mạnh / rất không tốt.\n"
+            "- Nếu có thể, thêm 1 trường hợp đặc biệt là keyword hiệu suất tốt hoặc keyword giảm mạnh.\n"
             "Yêu cầu:\n"
-            "- Không bỏ sót cluster nào.\n"
-            "- Không dùng markdown bullet ký hiệu; chỉ viết plain text thành từng đoạn rõ ràng.\n"
-            "- Không viết chung chung kiểu dữ liệu ổn. Phải bám tên cluster/sub-cluster thật trong dữ liệu."
+            "- Không viết chung chung kiểu dữ liệu ổn.\n"
+            "- Phải bám tên cluster/sub-cluster thật trong dữ liệu.\n"
+            "- Ưu tiên câu ngắn, dễ scan."
         )
         api_key = self._project_api_key(project_id) if allow_ai else None
-        content = call_claude(prompt, api_key) or fallback_weekly_range_note(context)
+        content = ensure_complete_weekly_range_note(call_claude(prompt, api_key), context)
         return self._weekly_note_payload(
             context=context,
             content=content,

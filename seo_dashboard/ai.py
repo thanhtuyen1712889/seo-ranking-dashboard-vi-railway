@@ -65,9 +65,12 @@ def fallback_weekly_range_note(context: dict[str, Any]) -> str:
     groups = context.get("groups") or []
     if not groups:
         return (
-            "Tổng quan: Chưa đủ dữ liệu trong khoảng ngày đã chọn để tạo nhận xét.\n"
-            "Các điểm sáng: Hãy nới rộng khoảng ngày hoặc kiểm tra lại dữ liệu ranking.\n"
-            "Các điểm cần chú ý: Cần bổ sung thêm mốc dữ liệu trước khi đánh giá xu hướng."
+            "**Tổng quan**\n"
+            "- Chưa đủ dữ liệu trong khoảng ngày đã chọn để tạo nhận xét.\n\n"
+            "**Các điểm sáng**\n"
+            "- Hãy nới rộng khoảng ngày hoặc kiểm tra lại dữ liệu ranking.\n\n"
+            "**Các điểm cần chú ý**\n"
+            "- Cần bổ sung thêm mốc dữ liệu trước khi đánh giá xu hướng."
         )
 
     positive_groups = [item for item in groups if (item.get("rank_delta") or 0) > 0]
@@ -87,18 +90,24 @@ def fallback_weekly_range_note(context: dict[str, Any]) -> str:
     compare_text = context.get("compare_label") or "kỳ trước"
     baseline_text = context.get("baseline_label") or "baseline dài hạn"
 
-    overview = (
-        f"Tổng quan: Trong giai đoạn {context['from_label']} - {context['to_label']}, "
-        f"{strongest['name']} là nhóm kéo nhịp tích cực rõ nhất so với {compare_text}, "
-        f"trong khi {weakest['name']} đang chậm hơn mặt bằng chung. "
-        f"So với {baseline_text}, hiệu suất tổng thể hiện {'đang cải thiện' if (context.get('overall_delta') or 0) > 0 else 'cần theo dõi thêm'}."
-    )
+    overview_lines = [
+        "**Tổng quan**",
+        (
+            f"- Trong giai đoạn {context['from_label']} - {context['to_label']}, "
+            f"**{strongest['name']}** là nhóm kéo nhịp tích cực rõ nhất so với {compare_text}, "
+            f"trong khi **{weakest['name']}** đang chậm hơn mặt bằng chung."
+        ),
+        (
+            f"- So với {baseline_text}, hiệu suất tổng thể hiện "
+            f"{'đang cải thiện' if (context.get('overall_delta') or 0) > 0 else 'cần theo dõi thêm'}."
+        ),
+    ]
 
-    bright_lines = ["Các điểm sáng:"]
-    watch_lines = ["Các điểm cần chú ý:"]
+    bright_lines = ["**Các điểm sáng**"]
+    watch_lines = ["**Các điểm cần chú ý**"]
     for breakdown in context.get("group_breakdowns") or []:
         bright_cluster_names = ", ".join(item["name"] for item in breakdown.get("bright_clusters") or []) or "chưa có cụm tăng đủ mạnh, nhưng vẫn giữ nhịp ổn định"
-        bright_line = f"{breakdown['group_name']}: sub-cluster sáng là {bright_cluster_names}."
+        bright_line = f"- **{breakdown['group_name']}**: sub-cluster sáng là **{bright_cluster_names}**."
         if breakdown.get("best_keyword"):
             bright_line += (
                 f" Trường hợp nổi bật: {breakdown['best_keyword']['keyword']} "
@@ -109,7 +118,7 @@ def fallback_weekly_range_note(context: dict[str, Any]) -> str:
         bright_lines.append(bright_line)
 
         watch_cluster_names = ", ".join(item["name"] for item in breakdown.get("watch_clusters") or []) or "chưa có cụm giảm sâu, cần tiếp tục theo dõi"
-        watch_line = f"{breakdown['group_name']}: cần chú ý {watch_cluster_names}."
+        watch_line = f"- **{breakdown['group_name']}**: cần chú ý **{watch_cluster_names}**."
         if breakdown.get("worst_keyword"):
             watch_line += (
                 f" Trường hợp đặc biệt: {breakdown['worst_keyword']['keyword']} "
@@ -120,11 +129,38 @@ def fallback_weekly_range_note(context: dict[str, Any]) -> str:
         watch_lines.append(watch_line)
 
     if highlight != strongest["name"]:
-        bright_lines.append(f"Cơ hội thêm: {highlight} vẫn còn dư địa để ưu tiên tối ưu tiếp.")
+        bright_lines.append(f"- Cơ hội thêm: **{highlight}** vẫn còn dư địa để ưu tiên tối ưu tiếp.")
     if watch_name != weakest["name"]:
-        watch_lines.append(f"Kết luận ngắn: {watch_name} nên được theo dõi sát hơn trong kỳ tới.")
+        watch_lines.append(f"- Kết luận ngắn: **{watch_name}** nên được theo dõi sát hơn trong kỳ tới.")
 
-    return "\n".join([overview, *bright_lines, *watch_lines])
+    return "\n".join([*overview_lines, "", *bright_lines, "", *watch_lines])
+
+
+def weekly_note_mentions_all_groups(content: str, context: dict[str, Any]) -> bool:
+    normalized_content = (content or "").lower()
+    groups = context.get("groups") or []
+    return all(str(group.get("name") or "").strip().lower() in normalized_content for group in groups if group.get("name"))
+
+
+def weekly_note_has_structure(content: str) -> bool:
+    normalized_content = (content or "").lower()
+    required_markers = ["tổng quan", "các điểm sáng", "các điểm cần chú ý"]
+    has_sections = all(marker in normalized_content for marker in required_markers)
+    has_bullets = "- " in content or "\u2022 " in content
+    return has_sections and has_bullets
+
+
+def ensure_complete_weekly_range_note(content: str | None, context: dict[str, Any]) -> str:
+    if not content:
+        return fallback_weekly_range_note(context)
+    normalized = content.strip()
+    if not normalized:
+        return fallback_weekly_range_note(context)
+    if not weekly_note_has_structure(normalized):
+        return fallback_weekly_range_note(context)
+    if not weekly_note_mentions_all_groups(normalized, context):
+        return fallback_weekly_range_note(context)
+    return normalized
 
 
 def fallback_cluster_pattern(

@@ -19,6 +19,118 @@ import { formatDateLabel, formatDateTime } from "../lib/format";
 
 const PALETTE = ["#38bdf8", "#2dd4bf", "#7ee787", "#f59e0b", "#fb7185", "#f97316"];
 
+function renderInlineEmphasis(text) {
+  if (!text) return null;
+  const tokens = [];
+  const pattern = /(\*\*[^*]+\*\*|\*[^*]+\*)/g;
+  let lastIndex = 0;
+  let match = pattern.exec(text);
+  while (match) {
+    if (match.index > lastIndex) {
+      tokens.push({ type: "text", value: text.slice(lastIndex, match.index) });
+    }
+    const value = match[0];
+    if (value.startsWith("**")) {
+      tokens.push({ type: "strong", value: value.slice(2, -2) });
+    } else {
+      tokens.push({ type: "em", value: value.slice(1, -1) });
+    }
+    lastIndex = match.index + value.length;
+    match = pattern.exec(text);
+  }
+  if (lastIndex < text.length) {
+    tokens.push({ type: "text", value: text.slice(lastIndex) });
+  }
+  return tokens.map((token, index) => {
+    if (token.type === "strong") {
+      return (
+        <strong key={`${token.type}-${index}`} className="font-semibold text-white">
+          {token.value}
+        </strong>
+      );
+    }
+    if (token.type === "em") {
+      return (
+        <em key={`${token.type}-${index}`} className="italic text-slate-100">
+          {token.value}
+        </em>
+      );
+    }
+    return <span key={`${token.type}-${index}`}>{token.value}</span>;
+  });
+}
+
+function parseWeeklyNote(content) {
+  const sections = [];
+  const lines = (content || "").split("\n");
+  let currentSection = null;
+
+  const pushSection = () => {
+    if (currentSection) {
+      sections.push(currentSection);
+    }
+  };
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    const strongHeading = line.match(/^\*\*(.+?)\*\*$/);
+    const plainHeading = line.match(/^(Tổng quan|Các điểm sáng|Các điểm cần chú ý)\s*:?\s*$/i);
+    if (strongHeading || plainHeading) {
+      pushSection();
+      currentSection = {
+        title: strongHeading ? strongHeading[1] : plainHeading[1],
+        items: [],
+        paragraphs: [],
+      };
+      continue;
+    }
+    const bulletMatch = line.match(/^[-•]\s+(.+)$/);
+    if (!currentSection) {
+      currentSection = { title: "Tổng quan", items: [], paragraphs: [] };
+    }
+    if (bulletMatch) {
+      currentSection.items.push(bulletMatch[1]);
+    } else {
+      currentSection.paragraphs.push(line);
+    }
+  }
+
+  pushSection();
+  return sections;
+}
+
+function WeeklyNoteContent({ content }) {
+  const sections = parseWeeklyNote(content);
+  if (!sections.length) {
+    return <p className="text-slate-300">Chưa có nhận xét cho khoảng ngày hiện tại.</p>;
+  }
+  return (
+    <div className="space-y-5">
+      {sections.map((section) => (
+        <section key={section.title} className="space-y-3">
+          <h3 className="text-sm font-semibold uppercase tracking-[0.24em] text-neon-yellow">{section.title}</h3>
+          {section.paragraphs.map((paragraph, index) => (
+            <p key={`${section.title}-paragraph-${index}`} className="text-base leading-8 text-slate-100">
+              {renderInlineEmphasis(paragraph)}
+            </p>
+          ))}
+          {section.items.length ? (
+            <ul className="space-y-3">
+              {section.items.map((item, index) => (
+                <li key={`${section.title}-item-${index}`} className="flex items-start gap-3 text-base leading-8 text-slate-100">
+                  <span className="mt-3 inline-block h-2 w-2 rounded-full bg-neon-cyan" />
+                  <span>{renderInlineEmphasis(item)}</span>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </section>
+      ))}
+    </div>
+  );
+}
+
 export default function OverviewTab({
   overview,
   mode,
@@ -126,13 +238,23 @@ export default function OverviewTab({
                 </label>
               </div>
             ) : null}
-            <textarea
-              className={`mt-3 min-h-[220px] w-full resize-y rounded-[24px] border border-white/10 bg-black/20 px-5 py-4 text-slate-100 outline-none transition ${mode === "client" ? "text-lg leading-8 lg:min-h-[260px]" : "text-base leading-8 lg:min-h-[240px]"} ${editingNote ? "ring-2 ring-neon-yellow/30" : ""}`}
-              value={weeklyDraft}
-              readOnly={!editingNote}
-              onChange={(event) => setWeeklyDraft(event.target.value)}
-              placeholder={weeklyNoteLoading ? "Đang đọc dữ liệu dashboard để tạo nhận xét..." : "Chưa có nhận xét cho khoảng ngày hiện tại."}
-            />
+            {editingNote ? (
+              <textarea
+                className={`mt-3 min-h-[220px] w-full resize-y rounded-[24px] border border-white/10 bg-black/20 px-5 py-4 text-slate-100 outline-none transition ${mode === "client" ? "text-lg leading-8 lg:min-h-[260px]" : "text-base leading-8 lg:min-h-[240px]"} ring-2 ring-neon-yellow/30`}
+                value={weeklyDraft}
+                readOnly={false}
+                onChange={(event) => setWeeklyDraft(event.target.value)}
+                placeholder={weeklyNoteLoading ? "Đang đọc dữ liệu dashboard để tạo nhận xét..." : "Chưa có nhận xét cho khoảng ngày hiện tại."}
+              />
+            ) : (
+              <div className={`mt-3 min-h-[220px] w-full rounded-[24px] border border-white/10 bg-black/20 px-5 py-5 ${mode === "client" ? "text-lg lg:min-h-[260px]" : "lg:min-h-[240px]"}`}>
+                {weeklyNoteLoading ? (
+                  <p className="text-slate-400">Đang đọc dữ liệu dashboard để tạo nhận xét...</p>
+                ) : (
+                  <WeeklyNoteContent content={weeklyDraft} />
+                )}
+              </div>
+            )}
             <p className="mt-3 text-xs text-slate-400">
               {weeklyNoteLoading
                 ? "Đang cập nhật nhận xét theo dữ liệu mới nhất..."

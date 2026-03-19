@@ -42,6 +42,7 @@ export default function KeywordTableTab({
         left: `${config.left}px`,
         minWidth: `${config.width}px`,
         width: `${config.width}px`,
+        ...(isHeader ? { top: "0px" } : {}),
       },
       className: `sticky ${isHeader ? "z-20 bg-[#0f1723]" : "z-10 bg-[#111723]"} ${index === stickyColumns.length - 1 ? "shadow-[10px_0_24px_rgba(3,7,18,0.55)]" : ""}`,
     };
@@ -114,27 +115,27 @@ export default function KeywordTableTab({
         <div className="flex flex-wrap items-center gap-3 border-b border-white/10 px-5 py-4 text-sm text-slate-400">
           <span className="chip border-neon-cyan/30 bg-neon-cyan/10 text-neon-cyan">Ngày hiện tại nằm bên trái: {formatDateLabel(currentDate)}</span>
           <span className="chip">Ngày quá khứ kéo dần về bên phải</span>
-          <span>6 cột đầu đã được cố định đến <span className="font-semibold text-white">Thay đổi</span> để kéo ngang vẫn bám được dữ liệu.</span>
+          <span>6 cột đầu và hàng tiêu đề đã được cố định để kéo ngang hoặc kéo dọc vẫn bám được dữ liệu.</span>
         </div>
-        <div className="overflow-x-auto">
+        <div className="max-h-[72vh] overflow-auto">
           <table className="min-w-full border-separate border-spacing-0 text-sm">
-            <thead className="sticky top-0 z-10 bg-[#0f1723]">
+            <thead>
               <tr>
-                <th {...stickyProps(0, true)} className={`${stickyProps(0, true).className} border-b border-white/10 px-4 py-3 text-left font-semibold text-slate-400`}>#</th>
-                <th {...stickyProps(1, true)} className={`${stickyProps(1, true).className} border-b border-white/10 px-4 py-3 text-left font-semibold text-slate-400`}>Bộ</th>
-                <th {...stickyProps(2, true)} className={`${stickyProps(2, true).className} border-b border-white/10 px-4 py-3 text-left font-semibold text-slate-400`}>Keyword</th>
-                {mode === "team" ? <th {...stickyProps(3, true)} className={`${stickyProps(3, true).className} border-b border-white/10 px-4 py-3 text-left font-semibold text-slate-400`}>Vol</th> : null}
-                {mode === "team" ? <th {...stickyProps(4, true)} className={`${stickyProps(4, true).className} border-b border-white/10 px-4 py-3 text-left font-semibold text-slate-400`}>Best Rank</th> : null}
-                <th {...stickyProps(mode === "team" ? 5 : 3, true)} className={`${stickyProps(mode === "team" ? 5 : 3, true).className} border-b border-white/10 px-4 py-3 text-left font-semibold text-slate-400`}>Thay Đổi</th>
+                <th {...stickyProps(0, true)} className={`${stickyProps(0, true).className} top-0 border-b border-white/10 px-4 py-3 text-left font-semibold text-slate-400`}>#</th>
+                <th {...stickyProps(1, true)} className={`${stickyProps(1, true).className} top-0 border-b border-white/10 px-4 py-3 text-left font-semibold text-slate-400`}>Bộ</th>
+                <th {...stickyProps(2, true)} className={`${stickyProps(2, true).className} top-0 border-b border-white/10 px-4 py-3 text-left font-semibold text-slate-400`}>Keyword</th>
+                {mode === "team" ? <th {...stickyProps(3, true)} className={`${stickyProps(3, true).className} top-0 border-b border-white/10 px-4 py-3 text-left font-semibold text-slate-400`}>Vol</th> : null}
+                {mode === "team" ? <th {...stickyProps(4, true)} className={`${stickyProps(4, true).className} top-0 border-b border-white/10 px-4 py-3 text-left font-semibold text-slate-400`}>Best Rank</th> : null}
+                <th {...stickyProps(mode === "team" ? 5 : 3, true)} className={`${stickyProps(mode === "team" ? 5 : 3, true).className} top-0 border-b border-white/10 px-4 py-3 text-left font-semibold text-slate-400`}>Thay Đổi</th>
                 {orderedDates.map((date) => (
                   <th
                     key={date}
-                    className={`border-b px-3 py-3 text-center font-semibold ${date === currentDate ? "border-neon-cyan/35 bg-neon-cyan/6 text-neon-cyan" : "border-white/10 text-slate-400"}`}
+                    className={`sticky top-0 z-10 border-b px-3 py-3 text-center font-semibold ${date === currentDate ? "border-neon-cyan/35 bg-[#0f1723] text-neon-cyan" : "border-white/10 bg-[#0f1723] text-slate-400"}`}
                   >
                     {formatDateLabel(date)}
                   </th>
                 ))}
-                <th className="border-b border-white/10 px-4 py-3 text-left font-semibold text-slate-400">KPI Status</th>
+                <th className="sticky top-0 z-10 border-b border-white/10 bg-[#0f1723] px-4 py-3 text-left font-semibold text-slate-400">KPI Status</th>
               </tr>
             </thead>
             <tbody>
