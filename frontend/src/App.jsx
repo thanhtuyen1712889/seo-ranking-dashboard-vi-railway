@@ -88,7 +88,7 @@ export default function App() {
     main_cluster: "",
     tag: "all",
     sort_by: "health_score",
-    clustering_mode: "default",
+    sub_cluster_mode: "auto",
   });
   const [keywordFilters, setKeywordFilters] = useState({
     current_date: "",
@@ -142,7 +142,7 @@ export default function App() {
     getGroupView(token, selectedProjectId, groupFilters)
       .then(setGroupView)
       .catch((error) => setToast({ type: "error", message: error.message }));
-  }, [selectedProjectId, token, groupFilters.current_date, groupFilters.baseline_date, groupFilters.status, groupFilters.main_cluster, groupFilters.tag, groupFilters.sort_by, groupFilters.clustering_mode]);
+  }, [selectedProjectId, token, groupFilters.current_date, groupFilters.baseline_date, groupFilters.status, groupFilters.main_cluster, groupFilters.tag, groupFilters.sort_by, groupFilters.sub_cluster_mode]);
 
   useEffect(() => {
     if (!selectedProjectId || !token || !keywordFilters.current_date) return;

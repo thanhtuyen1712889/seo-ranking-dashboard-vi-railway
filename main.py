@@ -166,9 +166,18 @@ def group_view(
     main_cluster: str | None = Query(default=None),
     tag: str = Query(default="all"),
     sort_by: str = Query(default="health_score"),
-    clustering_mode: str = Query(default="default"),
+    sub_cluster_mode: str | None = Query(default=None),
+    clustering_mode: str | None = Query(default=None),
+    custom_primary_tag_prefix: str | None = Query(default=None),
+    custom_secondary_tag_prefix: str | None = Query(default=None),
     _: dict[str, Any] = Depends(require_auth),
 ) -> dict[str, Any]:
+    custom_config = None
+    if custom_primary_tag_prefix or custom_secondary_tag_prefix:
+        custom_config = {
+            "primary_tag_prefix": custom_primary_tag_prefix or "",
+            "secondary_tag_prefix": custom_secondary_tag_prefix or "",
+        }
     return service.get_group_view(
         project_id,
         current_date=current_date,
@@ -177,7 +186,8 @@ def group_view(
         main_cluster=main_cluster,
         tag_filter=tag,
         sort_by=sort_by,
-        clustering_mode=clustering_mode,
+        sub_cluster_mode=sub_cluster_mode or clustering_mode or "auto",
+        custom_config=custom_config,
     )
 
 

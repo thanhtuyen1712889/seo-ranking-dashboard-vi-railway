@@ -5,10 +5,12 @@ import os
 import re
 from collections import Counter, defaultdict
 from datetime import datetime
+from math import log
 from statistics import mean
 from typing import Any
 
 import pandas as pd
+from nltk.stem import PorterStemmer
 
 from .ai import (
     call_claude,
@@ -63,31 +65,6 @@ def clamp(value: float, minimum: float, maximum: float) -> float:
     return max(minimum, min(maximum, value))
 
 
-PRODUCT_CLUSTER_LABELS = {
-    "plugin": "Plugin",
-    "module": "Module",
-    "extension": "Extension",
-    "suite": "Suite / package",
-    "theme": "Theme",
-    "store": "Store",
-    "seo_extension": "SEO Extension",
-}
-
-PLATFORM_LABELS = {
-    "magento_2": "Magento 2",
-    "magento_1_or_generic": "Magento",
-    "shopify": "Shopify",
-    "woocommerce": "WooCommerce",
-}
-
-USE_CASE_LABELS = {
-    "b2b": "Generic B2B",
-    "integration": "Integration / connector",
-    "checkout": "Checkout & payment",
-    "subscription": "Subscription / recurring",
-    "login": "Login / account access",
-}
-
 CLUSTER_SORTS = {
     "health_score": ("health_score", True),
     "trend_strength": ("rank_delta", True),
@@ -95,30 +72,224 @@ CLUSTER_SORTS = {
     "avg_rank": ("avg_rank_current", False),
 }
 
-PRODUCT_TAG_PATTERNS = {
-    "seo_extension": [r"\bseo\b"],
-    "plugin": [r"\bplugins?\b"],
-    "module": [r"\bmodules?\b"],
-    "extension": [r"\bextensions?\b", r"\baddons?\b", r"\badd[- ]ons?\b"],
-    "suite": [r"\bsuites?\b", r"\bpackages?\b", r"\bbundle\b"],
-    "theme": [r"\bthemes?\b"],
-    "store": [r"\bstores?\b", r"\bstorefront\b", r"\bstore front\b"],
+STEMMER = PorterStemmer()
+
+TOKEN_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "at",
+    "by",
+    "for",
+    "from",
+    "in",
+    "into",
+    "of",
+    "on",
+    "or",
+    "the",
+    "to",
+    "via",
+    "with",
+    "without",
 }
 
-PLATFORM_TAG_PATTERNS = {
-    "magento_2": [r"\bmagento 2\b", r"\bfor magento 2\b"],
-    "magento_1_or_generic": [r"\bmagento\b"],
-    "shopify": [r"\bshopify\b"],
-    "woocommerce": [r"\bwoocommerce\b"],
+TAG_FAMILY_LABELS = {
+    "platform": "nền tảng",
+    "product": "loại sản phẩm",
+    "intent": "nhu cầu",
 }
 
-INTENT_TAG_PATTERNS = {
-    "b2b": [r"\bb2b\b"],
-    "integration": [r"\bintegration\b", r"\bconnector\b"],
-    "checkout": [r"\bcheckout\b", r"\bpayment\b"],
-    "subscription": [r"\bsubscription\b", r"\brecurring\b"],
-    "login": [r"\blogin\b", r"\bcustomer login\b", r"\baccount access\b"],
+TAG_LIBRARY = {
+    "platform": {
+        "magento_2": {
+            "label": "Magento 2",
+            "aliases": ["magento 2", "magento2", "for magento 2", "adobe commerce 2"],
+        },
+        "magento_generic": {
+            "label": "Magento (generic)",
+            "aliases": ["magento", "adobe commerce"],
+            "suppressed_by": ["platform:magento_2"],
+        },
+        "shopify": {
+            "label": "Shopify",
+            "aliases": ["shopify"],
+        },
+        "woocommerce": {
+            "label": "WooCommerce",
+            "aliases": ["woocommerce", "woo commerce"],
+        },
+    },
+    "product": {
+        "plugin": {
+            "label": "Plugin",
+            "aliases": ["plugin", "plugins"],
+        },
+        "module": {
+            "label": "Module",
+            "aliases": ["module", "modules"],
+        },
+        "extension": {
+            "label": "Extension",
+            "aliases": ["extension", "extensions", "addon", "addons", "add on", "add ons"],
+        },
+        "suite": {
+            "label": "Suite / package",
+            "aliases": ["suite", "suites", "package", "packages", "bundle", "bundles"],
+        },
+        "theme": {
+            "label": "Theme",
+            "aliases": ["theme", "themes"],
+        },
+        "store": {
+            "label": "Store / storefront",
+            "aliases": ["store", "stores", "storefront", "store front"],
+        },
+    },
+    "intent": {
+        "b2b": {
+            "label": "Generic B2B",
+            "aliases": ["b2b", "wholesale"],
+        },
+        "login": {
+            "label": "Login / account access",
+            "aliases": ["login", "customer login", "account access", "sign in", "signin"],
+        },
+        "checkout": {
+            "label": "Checkout & payment",
+            "aliases": ["checkout", "payment", "one step checkout"],
+        },
+        "subscription": {
+            "label": "Subscription / recurring",
+            "aliases": ["subscription", "subscriptions", "recurring", "recurring billing"],
+        },
+        "integration": {
+            "label": "Integration / connector",
+            "aliases": ["integration", "integrations", "connector", "connectors", "sync"],
+        },
+        "seo": {
+            "label": "SEO",
+            "aliases": ["seo", "search engine optimization"],
+        },
+    },
 }
+
+TAG_PRIORITY = {
+    family: [f"{family}:{tag_key}" for tag_key in family_tags]
+    for family, family_tags in TAG_LIBRARY.items()
+}
+
+SUB_CLUSTER_MODE_META = {
+    "auto": {
+        "label": "Auto",
+        "description": "Tự chọn góc nhìn phù hợp nhất theo phân bố tag trong dataset hiện tại.",
+    },
+    "platform_first": {
+        "label": "Platform",
+        "description": "Nhìn theo nền tảng trước để so sánh Magento, Shopify, WooCommerce...",
+        "primary_family": "platform",
+    },
+    "product_first": {
+        "label": "Product",
+        "description": "Nhìn theo loại sản phẩm trước để tách plugin, module, extension, suite...",
+        "primary_family": "product",
+    },
+    "intent_first": {
+        "label": "Intent",
+        "description": "Nhìn theo nhu cầu / use case trước để thấy login, checkout, integration, subscription...",
+        "primary_family": "intent",
+    },
+    "custom": {
+        "label": "Custom",
+        "description": "Ghép cụm theo prefix tag tùy chọn, không cần viết lại engine.",
+    },
+}
+
+LEGACY_SUB_CLUSTER_MODE_MAP = {
+    "default": "auto",
+    "platform": "platform_first",
+    "product_type": "product_first",
+    "intent": "intent_first",
+}
+
+
+def _normalize_ngram_text(value: str) -> str:
+    text = normalize_label(value)
+    replacements = {
+        r"\bmagento2\b": "magento 2",
+        r"\bwoo commerce\b": "woocommerce",
+        r"\bstore front\b": "storefront",
+        r"\badd ons?\b": "addon",
+        r"\bcheck out\b": "checkout",
+        r"\blog in\b": "login",
+        r"\bsign in\b": "signin",
+    }
+    for pattern, replacement in replacements.items():
+        text = re.sub(pattern, replacement, text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _stem_token(token: str) -> str:
+    if token in {"b2b", "seo"} or token.isdigit():
+        return token
+    return STEMMER.stem(token)
+
+
+def _signature_tokens(value: str) -> list[str]:
+    normalized = _normalize_ngram_text(value)
+    tokens = re.findall(r"[a-z0-9]+", normalized)
+    cleaned: list[str] = []
+    for token in tokens:
+        if token in TOKEN_STOPWORDS:
+            continue
+        if len(token) == 1 and not token.isdigit():
+            continue
+        cleaned.append(_stem_token(token))
+    return cleaned
+
+
+def _display_tokens(value: str) -> list[str]:
+    normalized = _normalize_ngram_text(value)
+    tokens = re.findall(r"[a-z0-9]+", normalized)
+    cleaned: list[str] = []
+    for token in tokens:
+        if token in TOKEN_STOPWORDS:
+            continue
+        if len(token) == 1 and not token.isdigit():
+            continue
+        cleaned.append(token)
+    return cleaned
+
+
+def _signature(value: str) -> str:
+    return " ".join(_signature_tokens(value))
+
+
+def _compile_tag_library() -> tuple[dict[str, dict[str, dict[str, Any]]], set[str], dict[str, str]]:
+    compiled: dict[str, dict[str, dict[str, Any]]] = {}
+    reserved_signatures: set[str] = set()
+    labels: dict[str, str] = {}
+    for family, tag_map in TAG_LIBRARY.items():
+        compiled[family] = {}
+        for tag_key, metadata in tag_map.items():
+            tag = f"{family}:{tag_key}"
+            signatures = {_signature(alias) for alias in metadata.get("aliases", [])}
+            signatures.discard("")
+            payload = {
+                **metadata,
+                "tag": tag,
+                "tag_key": tag_key,
+                "family": family,
+                "signatures": signatures,
+                "suppressed_by": metadata.get("suppressed_by", []),
+            }
+            compiled[family][tag] = payload
+            labels[tag] = str(metadata["label"])
+            reserved_signatures.update(signatures)
+    return compiled, reserved_signatures, labels
+
+
+COMPILED_TAG_LIBRARY, RESERVED_TAG_SIGNATURES, TAG_LABELS = _compile_tag_library()
 
 
 class DashboardService:
@@ -734,107 +905,278 @@ class DashboardService:
             entry["status"] = "đạt" if entry["achieved"] == entry["keyword_count"] else "chưa đạt"
         return metrics
 
-    def _match_tag_patterns(self, combined: str, mapping: dict[str, list[str]]) -> list[str]:
+    def _extract_candidate_ngram_pairs(self, text: str) -> list[tuple[str, str]]:
+        display_tokens = _display_tokens(text)
+        pairs: list[tuple[str, str]] = []
+        seen_signatures: set[str] = set()
+        for size in (1, 2, 3):
+            for index in range(len(display_tokens) - size + 1):
+                raw_tokens = display_tokens[index : index + size]
+                signature = " ".join(_stem_token(token) for token in raw_tokens)
+                if signature in seen_signatures:
+                    continue
+                pairs.append((signature, " ".join(raw_tokens)))
+                seen_signatures.add(signature)
+        return pairs
+
+    def _extract_candidate_ngrams(self, text: str) -> set[str]:
+        return {signature for signature, _ in self._extract_candidate_ngram_pairs(text)}
+
+    def _match_semantic_family_tags(
+        self,
+        keyword_ngrams: set[str],
+        context_ngrams: set[str],
+        family: str,
+    ) -> list[str]:
         matched: list[str] = []
-        for tag, patterns in mapping.items():
-            if any(re.search(pattern, combined) for pattern in patterns):
+        for tag in TAG_PRIORITY[family]:
+            signatures = COMPILED_TAG_LIBRARY[family][tag]["signatures"]
+            if signatures & keyword_ngrams:
                 matched.append(tag)
-        return matched
+        if not matched:
+            for tag in TAG_PRIORITY[family]:
+                signatures = COMPILED_TAG_LIBRARY[family][tag]["signatures"]
+                if signatures & context_ngrams:
+                    matched.append(tag)
+        matched_set = set(matched)
+        cleaned = [
+            tag
+            for tag in matched
+            if not any(suppressor in matched_set for suppressor in COMPILED_TAG_LIBRARY[family][tag].get("suppressed_by", []))
+        ]
+        return cleaned
 
-    def _match_preferred_tags(self, primary_text: str, fallback_text: str, mapping: dict[str, list[str]]) -> list[str]:
-        matched = self._match_tag_patterns(primary_text, mapping)
-        if matched:
-            return matched
-        return self._match_tag_patterns(fallback_text, mapping)
+    def _should_include_topic_signature(self, signature: str) -> bool:
+        if not signature or signature in RESERVED_TAG_SIGNATURES:
+            return False
+        tokens = signature.split()
+        if not tokens or all(token.isdigit() for token in tokens):
+            return False
+        if len(tokens) == 1 and len(tokens[0]) < 4:
+            return False
+        return True
 
-    def _keyword_subcluster_tags(self, keyword: dict[str, Any]) -> list[str]:
-        group_name = keyword.get("group_name") or "general"
-        cluster_name = keyword.get("cluster_name") or ""
-        keyword_text = normalize_label(keyword.get("keyword") or "")
-        context_text = normalize_label(" ".join([group_name, cluster_name]))
-        tags: list[str] = []
-
-        # Prefer signals from the keyword itself so "module/plugin" is not swallowed
-        # by a broader group label such as "M2 Extensions".
-        tags.extend(self._match_preferred_tags(keyword_text, context_text, PRODUCT_TAG_PATTERNS))
-        platform_tags = self._match_preferred_tags(keyword_text, context_text, PLATFORM_TAG_PATTERNS)
-        if "magento_2" in platform_tags and "magento_1_or_generic" in platform_tags:
-            platform_tags = [tag for tag in platform_tags if tag != "magento_1_or_generic"]
-        tags.extend(platform_tags)
-        tags.extend(self._match_preferred_tags(keyword_text, context_text, INTENT_TAG_PATTERNS))
-
-        normalized_group = normalize_label(group_name).replace(" ", "_")
-        if normalized_group:
-            tags.append(normalized_group)
-        return sorted(set(tags))
-
-    def _subcluster_descriptor(self, keyword: dict[str, Any], clustering_mode: str) -> tuple[str, str, list[str]]:
-        tags = self._keyword_subcluster_tags(keyword)
-        product_tag = next(
-            (tag for tag in ("seo_extension", "suite", "extension", "module", "plugin", "theme", "store") if tag in tags),
-            None,
+    def _build_dataset_topic_tags(self, keywords: list[dict[str, Any]]) -> dict[int, list[str]]:
+        if len(keywords) < 3:
+            return {}
+        keyword_signatures: dict[int, set[str]] = {}
+        signature_display: dict[str, str] = {}
+        counter: Counter[str] = Counter()
+        for keyword in keywords:
+            pairs = self._extract_candidate_ngram_pairs(keyword.get("keyword") or "")
+            signatures = {
+                signature
+                for signature, _ in pairs
+                if self._should_include_topic_signature(signature)
+            }
+            for signature, display in pairs:
+                if signature in signatures and signature not in signature_display:
+                    signature_display[signature] = display
+            keyword_signatures[int(keyword["id"])] = signatures
+            counter.update(signatures)
+        minimum_hits = max(2, round(len(keywords) * 0.18))
+        selected_signatures = [
+            signature
+            for signature, hits in counter.items()
+            if hits >= minimum_hits
+        ]
+        selected_signatures.sort(
+            key=lambda signature: (counter[signature], len(signature.split()), len(signature)),
+            reverse=True,
         )
-        platform_tag = next(
-            (tag for tag in ("magento_2", "shopify", "woocommerce", "magento_1_or_generic") if tag in tags),
-            None,
-        )
-        use_case_tag = next(
-            (tag for tag in ("b2b", "integration", "checkout", "subscription", "login") if tag in tags),
-            None,
-        )
+        selected_signatures = selected_signatures[:12]
+        topic_tags: dict[int, list[str]] = defaultdict(list)
+        for signature in selected_signatures:
+            display_value = signature_display.get(signature, signature).replace(" ", "_")
+            tag = f"topic:{display_value}"
+            for keyword_id, signatures in keyword_signatures.items():
+                if signature in signatures:
+                    topic_tags[keyword_id].append(tag)
+        return {keyword_id: sorted(tags) for keyword_id, tags in topic_tags.items()}
 
-        cluster_id_parts: list[str] = []
-        cluster_label = ""
-        if clustering_mode == "platform":
-            primary_platform = platform_tag or "other_platform"
-            cluster_id_parts.extend(["platform", primary_platform])
-            if platform_tag:
-                cluster_label = f"{PLATFORM_LABELS[platform_tag]} (mọi loại)"
-            else:
-                cluster_label = "Khác (mọi loại)"
-        elif clustering_mode == "product_type":
-            primary_product = product_tag or "other_type"
-            cluster_id_parts.extend(["product_type", primary_product])
-            if product_tag:
-                cluster_label = f"{PRODUCT_CLUSTER_LABELS[product_tag]} (mọi nền tảng)"
-            else:
-                cluster_label = "Khác (mọi nền tảng)"
-        elif clustering_mode == "intent":
-            primary_intent = use_case_tag or ("b2b" if "b2b" in tags else "generic_intent")
-            cluster_id_parts.extend(["intent", primary_intent])
-            if primary_intent in USE_CASE_LABELS:
-                cluster_label = USE_CASE_LABELS[primary_intent]
-            else:
-                cluster_label = "Nhu cầu chung"
-        elif product_tag:
-            cluster_id_parts.append(product_tag)
-            cluster_label = PRODUCT_CLUSTER_LABELS[product_tag]
-            if platform_tag:
-                cluster_id_parts.append(platform_tag)
-                cluster_label = f"{cluster_label} ({PLATFORM_LABELS[platform_tag]})"
-        elif use_case_tag:
-            cluster_id_parts.append(use_case_tag)
-            cluster_label = USE_CASE_LABELS[use_case_tag]
-            if platform_tag:
-                cluster_id_parts.append(platform_tag)
-                cluster_label = f"{cluster_label} ({PLATFORM_LABELS[platform_tag]})"
-        elif platform_tag:
-            cluster_id_parts.append(platform_tag)
-            cluster_label = PLATFORM_LABELS[platform_tag]
-        else:
-            fallback_name = (keyword.get("cluster_name") or keyword.get("group_name") or "Khác").strip()
-            cluster_id_parts.append(normalize_label(fallback_name).replace(" ", "_") or "other")
-            cluster_label = fallback_name
+    def _keyword_tag_profile(
+        self,
+        keyword: dict[str, Any],
+        dataset_topic_tags: dict[int, list[str]],
+    ) -> dict[str, Any]:
+        keyword_ngrams = self._extract_candidate_ngrams(keyword.get("keyword") or "")
+        context_ngrams = self._extract_candidate_ngrams(
+            " ".join(
+                [
+                    keyword.get("group_name") or "",
+                    keyword.get("cluster_name") or "",
+                ]
+            )
+        )
+        family_tags = {
+            family: self._match_semantic_family_tags(keyword_ngrams, context_ngrams, family)
+            for family in TAG_PRIORITY
+        }
+        topic_tags = dataset_topic_tags.get(int(keyword["id"]), [])
+        all_tags = sorted(
+            set(topic_tags)
+            | set(tag for tags in family_tags.values() for tag in tags)
+        )
+        return {
+            "keyword_ngrams": sorted(keyword_ngrams),
+            "context_ngrams": sorted(context_ngrams),
+            "family_tags": family_tags,
+            "tags": all_tags,
+        }
 
-        cluster_id = "_".join(cluster_id_parts)
-        return cluster_id, cluster_label, tags
+    def _normalize_sub_cluster_mode(self, requested_mode: str | None) -> str:
+        mode = (requested_mode or "auto").strip().lower()
+        mode = LEGACY_SUB_CLUSTER_MODE_MAP.get(mode, mode)
+        return mode if mode in SUB_CLUSTER_MODE_META else "auto"
+
+    def _family_distribution(self, tag_profiles: dict[int, dict[str, Any]], family: str) -> dict[str, Any]:
+        total_keywords = len(tag_profiles)
+        primary_tags = [
+            profile["family_tags"][family][0]
+            for profile in tag_profiles.values()
+            if profile["family_tags"][family]
+        ]
+        counter = Counter(primary_tags)
+        covered = sum(counter.values())
+        coverage = covered / total_keywords if total_keywords else 0.0
+        bucket_count = len(counter)
+        dominant_share = max((count / covered) for count in counter.values()) if covered else 1.0
+        entropy = 0.0
+        if covered and bucket_count > 1:
+            entropy = -sum(
+                (count / covered) * log(count / covered)
+                for count in counter.values()
+            ) / log(bucket_count)
+        segmentation_score = min(bucket_count, 4) / 4 if bucket_count else 0.0
+        balance_score = 0.0 if bucket_count <= 1 else 1 - dominant_share
+        score = round((coverage * 0.6) + (segmentation_score * 0.25) + (balance_score * 0.15), 4)
+        return {
+            "coverage": coverage,
+            "bucket_count": bucket_count,
+            "dominant_share": dominant_share,
+            "entropy": entropy,
+            "score": score,
+            "counter": counter,
+        }
+
+    def _resolve_sub_cluster_mode(
+        self,
+        requested_mode: str,
+        tag_profiles: dict[int, dict[str, Any]],
+        custom_config: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        normalized_mode = self._normalize_sub_cluster_mode(requested_mode)
+        family_distribution = {
+            family: self._family_distribution(tag_profiles, family)
+            for family in TAG_FAMILY_LABELS
+        }
+        default_secondary = {
+            "platform": "product",
+            "product": "platform",
+            "intent": "product",
+        }
+        if normalized_mode == "custom":
+            primary_family = (custom_config or {}).get("primary_tag_prefix") or "platform"
+            secondary_family = (custom_config or {}).get("secondary_tag_prefix") or None
+            primary_family = primary_family if primary_family in TAG_FAMILY_LABELS else "platform"
+            secondary_family = secondary_family if secondary_family in TAG_FAMILY_LABELS else None
+            note = (
+                f"Custom mode đang gom theo {TAG_FAMILY_LABELS[primary_family]} trước"
+                + (f", sau đó nối thêm {TAG_FAMILY_LABELS[secondary_family]}." if secondary_family else ".")
+            )
+            return {
+                "requested_mode": normalized_mode,
+                "resolved_mode": normalized_mode,
+                "primary_family": primary_family,
+                "secondary_family": secondary_family,
+                "note": note,
+                "family_distribution": family_distribution,
+            }
+        if normalized_mode == "auto":
+            best_family, best_stats = max(
+                family_distribution.items(),
+                key=lambda item: (item[1]["score"], item[1]["coverage"], item[1]["bucket_count"]),
+            )
+            coverage_pct = int(round(best_stats["coverage"] * 100))
+            note = (
+                f"Auto mode chọn gom theo {TAG_FAMILY_LABELS[best_family]} vì {coverage_pct}% keyword "
+                f"có tag {TAG_FAMILY_LABELS[best_family]} rõ ràng"
+            )
+            if best_stats["bucket_count"] > 1:
+                note += f", đồng thời tách được {best_stats['bucket_count']} cụm con dễ đọc."
+            else:
+                note += "."
+            return {
+                "requested_mode": normalized_mode,
+                "resolved_mode": f"{best_family}_first",
+                "primary_family": best_family,
+                "secondary_family": default_secondary.get(best_family),
+                "note": note,
+                "family_distribution": family_distribution,
+            }
+        primary_family = SUB_CLUSTER_MODE_META[normalized_mode]["primary_family"]
+        return {
+            "requested_mode": normalized_mode,
+            "resolved_mode": normalized_mode,
+            "primary_family": primary_family,
+            "secondary_family": default_secondary.get(primary_family),
+            "note": SUB_CLUSTER_MODE_META[normalized_mode]["description"],
+            "family_distribution": family_distribution,
+        }
+
+    def _tag_label(self, tag: str) -> str:
+        if tag in TAG_LABELS:
+            return TAG_LABELS[tag]
+        if tag.startswith("topic:"):
+            return tag.removeprefix("topic:").replace("_", " ").title()
+        if ":" in tag:
+            return tag.split(":", 1)[1].replace("_", " ").title()
+        return tag.replace("_", " ").title()
+
+    def _subcluster_descriptor(
+        self,
+        keyword: dict[str, Any],
+        tag_profile: dict[str, Any],
+        mode_meta: dict[str, Any],
+    ) -> tuple[str, str, list[str]]:
+        primary_family = mode_meta["primary_family"]
+        secondary_family = mode_meta.get("secondary_family")
+        primary_tags = tag_profile["family_tags"].get(primary_family, [])
+        secondary_tags = tag_profile["family_tags"].get(secondary_family, []) if secondary_family else []
+        primary_tag = primary_tags[0] if primary_tags else None
+        secondary_tag = secondary_tags[0] if secondary_tags else None
+
+        if primary_tag:
+            cluster_id = primary_tag.replace(":", "__")
+            cluster_label = self._tag_label(primary_tag)
+            if mode_meta["requested_mode"] == "custom" and secondary_tag:
+                cluster_id = f"{cluster_id}__{secondary_tag.replace(':', '__')}"
+                if primary_family == "platform":
+                    cluster_label = f"{cluster_label} - {self._tag_label(secondary_tag)}"
+                else:
+                    cluster_label = f"{cluster_label} ({self._tag_label(secondary_tag)})"
+            return cluster_id, cluster_label, tag_profile["tags"]
+
+        fallback_by_family = {
+            "platform": ("platform__other", "Khác / chưa rõ"),
+            "product": ("product__other", "Khác / chưa rõ"),
+            "intent": ("intent__generic", "Nhu cầu chung"),
+        }
+        if primary_family in fallback_by_family:
+            fallback_id, fallback_label = fallback_by_family[primary_family]
+            return fallback_id, fallback_label, tag_profile["tags"]
+
+        fallback_name = (keyword.get("cluster_name") or keyword.get("group_name") or "Khác / chưa rõ").strip()
+        fallback_slug = normalize_label(fallback_name).replace(" ", "_") or "other"
+        return f"fallback__{fallback_slug}", fallback_name, tag_profile["tags"]
 
     def _cluster_keyword_row(
         self,
         keyword: dict[str, Any],
+        tag_profile: dict[str, Any],
         current_date: str,
         baseline_date: str | None,
-        clustering_mode: str,
+        mode_meta: dict[str, Any],
     ) -> dict[str, Any] | None:
         current_rank = self._history_position(keyword["history"], current_date)
         if current_rank is None:
@@ -847,7 +1189,7 @@ class DashboardService:
                 trend_status = "rising"
             elif rank_delta <= -2:
                 trend_status = "declining"
-        cluster_id, cluster_name, tags = self._subcluster_descriptor(keyword, clustering_mode)
+        cluster_id, cluster_name, tags = self._subcluster_descriptor(keyword, tag_profile, mode_meta)
         return {
             "keyword_id": keyword["id"],
             "keyword": keyword["keyword"],
@@ -921,16 +1263,36 @@ class DashboardService:
         status_filter: str,
         tag_filter: str,
         sort_by: str,
-        clustering_mode: str,
+        sub_cluster_mode: str,
+        custom_config: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         keywords = self._load_keywords_with_history(project_id)
         groups = sorted({(keyword.get("group_name") or "Chưa phân nhóm") for keyword in keywords})
         selected_group = selected_group or (groups[0] if groups else None)
+        group_keywords = [
+            keyword
+            for keyword in keywords
+            if not selected_group or (keyword.get("group_name") or "Chưa phân nhóm") == selected_group
+        ]
+        dataset_topic_tags = self._build_dataset_topic_tags(group_keywords)
+        tag_profiles = {
+            int(keyword["id"]): self._keyword_tag_profile(keyword, dataset_topic_tags)
+            for keyword in group_keywords
+        }
+        mode_meta = self._resolve_sub_cluster_mode(
+            sub_cluster_mode,
+            tag_profiles,
+            custom_config=custom_config,
+        )
         relevant_rows = []
-        for keyword in keywords:
-            if selected_group and (keyword.get("group_name") or "Chưa phân nhóm") != selected_group:
-                continue
-            row = self._cluster_keyword_row(keyword, current_date, baseline_date, clustering_mode)
+        for keyword in group_keywords:
+            row = self._cluster_keyword_row(
+                keyword,
+                tag_profiles[int(keyword["id"])],
+                current_date,
+                baseline_date,
+                mode_meta,
+            )
             if row is None:
                 continue
             relevant_rows.append(row)
@@ -1107,7 +1469,13 @@ class DashboardService:
         }
         total_volume = sum(item["volume"] for item in relevant_rows)
         return {
-            "clustering_mode": clustering_mode,
+            "main_cluster": selected_group,
+            "sub_cluster_mode": mode_meta["requested_mode"],
+            "resolved_sub_cluster_mode": mode_meta["resolved_mode"],
+            "resolved_primary_tag_prefix": mode_meta["primary_family"],
+            "resolved_secondary_tag_prefix": mode_meta.get("secondary_family"),
+            "insight_note_global": mode_meta["note"],
+            "clustering_mode": mode_meta["requested_mode"],
             "dates": dates,
             "current_date": current_date,
             "baseline_date": baseline_date,
@@ -1268,12 +1636,20 @@ class DashboardService:
         main_cluster: str | None = None,
         tag_filter: str = "all",
         sort_by: str = "health_score",
-        clustering_mode: str = "default",
+        sub_cluster_mode: str = "auto",
+        custom_config: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         dates = self.get_project_dates(project_id)
+        normalized_mode = self._normalize_sub_cluster_mode(sub_cluster_mode)
         if not dates:
             return {
-                "clustering_mode": clustering_mode,
+                "main_cluster": None,
+                "sub_cluster_mode": normalized_mode,
+                "resolved_sub_cluster_mode": normalized_mode,
+                "resolved_primary_tag_prefix": None,
+                "resolved_secondary_tag_prefix": None,
+                "insight_note_global": "Chưa có dữ liệu để sinh sub-cluster.",
+                "clustering_mode": normalized_mode,
                 "dates": [],
                 "current_date": None,
                 "baseline_date": None,
@@ -1295,7 +1671,8 @@ class DashboardService:
             status_filter=status_filter,
             tag_filter=tag_filter,
             sort_by=sort_by,
-            clustering_mode=clustering_mode,
+            sub_cluster_mode=sub_cluster_mode,
+            custom_config=custom_config,
         )
 
     def get_keyword_table(self, project_id: int, filters: dict[str, Any]) -> dict[str, Any]:

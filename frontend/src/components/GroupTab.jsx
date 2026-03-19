@@ -64,10 +64,10 @@ export default function GroupTab({ data, filters, setFilters, mode }) {
     if (!filters.main_cluster && data.selected_main_cluster) {
       setFilters((previous) => ({ ...previous, main_cluster: data.selected_main_cluster }));
     }
-    if (!filters.clustering_mode && data.clustering_mode) {
-      setFilters((previous) => ({ ...previous, clustering_mode: data.clustering_mode }));
+    if (!filters.sub_cluster_mode && data.sub_cluster_mode) {
+      setFilters((previous) => ({ ...previous, sub_cluster_mode: data.sub_cluster_mode }));
     }
-  }, [data, filters.main_cluster, filters.clustering_mode, setFilters]);
+  }, [data, filters.main_cluster, filters.sub_cluster_mode, setFilters]);
 
   useEffect(() => {
     const defaultClusterId = data?.trend_panel?.selected_cluster_id || data?.cluster_list?.[0]?.cluster_id || "";
@@ -110,28 +110,37 @@ export default function GroupTab({ data, filters, setFilters, mode }) {
       <div className="panel-grid">
         <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
           <div>
-            <p className="text-sm font-semibold text-white">Chế độ phân cụm</p>
+            <p className="text-sm font-semibold text-white">Chế độ sub-cluster</p>
             <p className="mt-1 text-sm text-slate-400">
-              Dùng cùng một tập keyword nhưng đổi góc nhìn theo nền tảng, loại sản phẩm hoặc intent.
+              Cùng một tập keyword, cùng một engine tag, nhưng đổi góc nhìn gom cụm theo nền tảng, loại sản phẩm hoặc nhu cầu.
             </p>
           </div>
           <div className="flex flex-wrap gap-2 rounded-full border border-white/10 bg-white/[0.03] p-1">
             {[
-              ["default", "Mặc định"],
-              ["platform", "Nền tảng"],
-              ["product_type", "Loại sản phẩm"],
-              ["intent", "Nhu cầu"],
+              ["auto", "Auto"],
+              ["platform_first", "Platform"],
+              ["product_first", "Product"],
+              ["intent_first", "Intent"],
             ].map(([value, label]) => (
               <button
                 key={value}
-                className={`rounded-full px-4 py-2 text-sm font-semibold transition ${filters.clustering_mode === value ? "bg-neon-cyan text-slate-950" : "text-slate-300"}`}
+                className={`rounded-full px-4 py-2 text-sm font-semibold transition ${filters.sub_cluster_mode === value ? "bg-neon-cyan text-slate-950" : "text-slate-300"}`}
                 type="button"
-                onClick={() => setFilters({ ...filters, clustering_mode: value })}
+                onClick={() => setFilters({ ...filters, sub_cluster_mode: value })}
               >
                 {label}
               </button>
             ))}
           </div>
+        </div>
+        <div className="mt-4 rounded-[24px] border border-neon-cyan/18 bg-neon-cyan/6 px-4 py-4 text-sm leading-7 text-slate-300">
+          <p className="font-semibold text-white">Gợi ý từ engine sub-cluster</p>
+          <p className="mt-2">
+            {data.insight_note_global || "Engine đang phân tích phân bố tag để gom cụm phù hợp nhất cho bộ dữ liệu này."}
+          </p>
+          <p className="mt-2 text-xs uppercase tracking-[0.25em] text-slate-500">
+            Đang hiển thị: {data.sub_cluster_mode} · Quy về: {data.resolved_sub_cluster_mode}
+          </p>
         </div>
       </div>
 
