@@ -82,10 +82,10 @@ export default function OverviewTab({
 
       <div className={`rounded-[32px] border bg-gradient-to-br p-6 ${mode === "client" ? "border-neon-yellow/45 from-neon-yellow/18 to-neon-orange/8 shadow-warning" : "border-neon-yellow/30 from-neon-yellow/12 to-transparent shadow-warning"}`}>
         <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-          <div className="max-w-4xl">
+          <div className="min-w-0 flex-1 lg:pr-4">
             <p className="text-xs uppercase tracking-[0.3em] text-neon-yellow">⚡ Nhận xét hàng tuần</p>
             <textarea
-              className={`mt-3 min-h-36 w-full rounded-[24px] border border-white/10 bg-black/20 px-4 py-4 text-slate-100 outline-none ${mode === "client" ? "text-lg leading-8" : "text-base leading-7"} ${editingNote ? "ring-2 ring-neon-yellow/30" : ""}`}
+              className={`mt-3 min-h-[220px] w-full resize-y rounded-[24px] border border-white/10 bg-black/20 px-5 py-4 text-slate-100 outline-none transition ${mode === "client" ? "text-lg leading-8 lg:min-h-[260px]" : "text-base leading-8 lg:min-h-[240px]"} ${editingNote ? "ring-2 ring-neon-yellow/30" : ""}`}
               value={weeklyDraft}
               readOnly={!editingNote}
               onChange={(event) => setWeeklyDraft(event.target.value)}
@@ -97,7 +97,7 @@ export default function OverviewTab({
                 : "Bạn có thể tự tạo nhận xét mới hoặc nhập ghi chú tay cho tuần này."}
             </p>
           </div>
-          <div className="flex shrink-0 flex-wrap gap-3">
+          <div className="flex shrink-0 flex-wrap gap-3 lg:w-[260px] lg:justify-end">
             <button className="button-secondary" type="button" onClick={onGenerateInsight} disabled={generatingInsight}>
               {generatingInsight ? "Đang tạo..." : "Tạo nhận xét mới"}
             </button>
