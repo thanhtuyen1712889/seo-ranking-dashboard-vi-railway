@@ -138,7 +138,7 @@ export default function GroupTab({ data, filters, setFilters, mode, controlsMode
               type="button"
               onClick={() => setScenarioMenuOpen((previous) => !previous)}
             >
-              <span>Change sub-cluster view</span>
+              <span>Đổi góc nhìn sub-cluster</span>
               <span className="truncate text-slate-300">
                 {selectedScenario?.scenario_label || "Chọn góc nhìn"}
               </span>

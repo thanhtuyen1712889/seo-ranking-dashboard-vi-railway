@@ -13,6 +13,7 @@ import {
   createEvent,
   createProject,
   createReportSnapshotShare,
+  createSeoViewShare,
   createWeeklyInsight,
   exportKeywords,
   generateKeywordInsight,
@@ -46,7 +47,7 @@ const tabs = [
 ];
 
 export default function App() {
-  const publicShareMatch = window.location.pathname.match(/^\/(client|report)\/([^/]+)$/);
+  const publicShareMatch = window.location.pathname.match(/^\/(client|seo|report)\/([^/]+)$/);
   if (publicShareMatch) {
     return <PublicShareView shareType={publicShareMatch[1]} shareToken={publicShareMatch[2]} />;
   }
@@ -86,11 +87,14 @@ export default function App() {
   const [exporting, setExporting] = useState(false);
   const [reclustering, setReclustering] = useState(false);
   const [creatingClientView, setCreatingClientView] = useState(false);
+  const [creatingSeoView, setCreatingSeoView] = useState(false);
   const [creatingReportSnapshot, setCreatingReportSnapshot] = useState(false);
   const [viewStateReady, setViewStateReady] = useState(false);
   const [shareResult, setShareResult] = useState({
     client_view_url: "",
     client_view_password: "",
+    seo_view_url: "",
+    seo_view_password: "",
     report_snapshot_url: "",
   });
 
@@ -156,6 +160,8 @@ export default function App() {
     setShareResult({
       client_view_url: "",
       client_view_password: "",
+      seo_view_url: "",
+      seo_view_password: "",
       report_snapshot_url: "",
     });
     loadOverviewAndSettings(selectedProjectId, { preserveExisting: false });
@@ -577,12 +583,7 @@ export default function App() {
     try {
       const response = await createClientViewShare(token, selectedProjectId, {
         ...form,
-        state: {
-          mode,
-          active_tab: activeTab,
-          group_filters: groupFilters,
-          keyword_filters: keywordFilters,
-        },
+        state: buildShareState(CLIENT_MODE),
       });
       setShareResult((previous) => ({
         ...previous,
@@ -599,18 +600,45 @@ export default function App() {
     }
   }
 
+  function buildShareState(targetMode) {
+    return {
+      mode: targetMode,
+      active_tab: targetMode === CLIENT_MODE && activeTab === "keywords" ? "overview" : activeTab,
+      group_filters: groupFilters,
+      keyword_filters: keywordFilters,
+    };
+  }
+
+  async function handleCreateSeoViewShare(form) {
+    if (!selectedProjectId) return;
+    setCreatingSeoView(true);
+    try {
+      const response = await createSeoViewShare(token, selectedProjectId, {
+        ...form,
+        state: buildShareState(TEAM_MODE),
+      });
+      setShareResult((previous) => ({
+        ...previous,
+        seo_view_url: response.seo_view_url || previous.seo_view_url,
+        seo_view_password: response.seo_view_password || "",
+      }));
+      setToast({ type: "success", message: "Đã tạo link SEO riêng cho project này." });
+      const refreshedGroupView = await getGroupView(token, selectedProjectId, groupFilters);
+      setGroupView(refreshedGroupView);
+    } catch (error) {
+      setToast({ type: "error", message: error.message });
+    } finally {
+      setCreatingSeoView(false);
+    }
+  }
+
   async function handleCreateReportSnapshot(form) {
     if (!selectedProjectId) return;
     setCreatingReportSnapshot(true);
     try {
       const response = await createReportSnapshotShare(token, selectedProjectId, {
         ...form,
-        state: {
-          mode,
-          active_tab: activeTab,
-          group_filters: groupFilters,
-          keyword_filters: keywordFilters,
-        },
+        state: buildShareState(mode),
       });
       setShareResult((previous) => ({
         ...previous,
@@ -791,11 +819,15 @@ export default function App() {
               <SharePanel
                 projectName={project?.name || overview?.project?.name || ""}
                 clientViewUrl={shareResult.client_view_url || groupView?.client_view_url || settings?.client_view_url || ""}
+                seoViewUrl={shareResult.seo_view_url || groupView?.seo_view_url || settings?.seo_view_url || ""}
                 reportSnapshotUrl={shareResult.report_snapshot_url || groupView?.report_snapshot_url || settings?.report_snapshot_url || ""}
                 latestClientPassword={shareResult.client_view_password || ""}
+                latestSeoPassword={shareResult.seo_view_password || ""}
                 onCreateClientView={handleCreateClientViewShare}
+                onCreateSeoView={handleCreateSeoViewShare}
                 onCreateReportSnapshot={handleCreateReportSnapshot}
                 creatingClientView={creatingClientView}
+                creatingSeoView={creatingSeoView}
                 creatingReportSnapshot={creatingReportSnapshot}
               />
             ) : null}

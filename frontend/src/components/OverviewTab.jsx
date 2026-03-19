@@ -30,6 +30,7 @@ export default function OverviewTab({
   setManualEvent,
   onAddEvent,
   addingEvent,
+  readOnly = false,
 }) {
   const [editingNote, setEditingNote] = useState(false);
   const [weeklyDraft, setWeeklyDraft] = useState("");
@@ -97,28 +98,30 @@ export default function OverviewTab({
                 : "Bạn có thể tự tạo nhận xét mới hoặc nhập ghi chú tay cho tuần này."}
             </p>
           </div>
-          <div className="flex shrink-0 flex-wrap gap-3 lg:w-[260px] lg:justify-end">
-            <button className="button-secondary" type="button" onClick={onGenerateInsight} disabled={generatingInsight}>
-              {generatingInsight ? "Đang tạo..." : "Tạo nhận xét mới"}
-            </button>
-            {editingNote ? (
-              <>
-                <button className="button-primary" type="button" onClick={() => onSaveWeeklyNote(weeklyDraft)} disabled={savingWeeklyNote || !weeklyDraft.trim()}>
-                  {savingWeeklyNote ? "Đang lưu..." : "Lưu nhận xét"}
-                </button>
-                <button className="button-secondary" type="button" onClick={() => {
-                  setWeeklyDraft(overview.latest_insight?.content_vi || "");
-                  setEditingNote(false);
-                }}>
-                  Hủy sửa
-                </button>
-              </>
-            ) : (
-              <button className="button-secondary" type="button" onClick={() => setEditingNote(true)}>
-                Chỉnh sửa tay
+          {!readOnly ? (
+            <div className="flex shrink-0 flex-wrap gap-3 lg:w-[260px] lg:justify-end">
+              <button className="button-secondary" type="button" onClick={onGenerateInsight} disabled={generatingInsight}>
+                {generatingInsight ? "Đang tạo..." : "Tạo nhận xét mới"}
               </button>
-            )}
-          </div>
+              {editingNote ? (
+                <>
+                  <button className="button-primary" type="button" onClick={() => onSaveWeeklyNote(weeklyDraft)} disabled={savingWeeklyNote || !weeklyDraft.trim()}>
+                    {savingWeeklyNote ? "Đang lưu..." : "Lưu nhận xét"}
+                  </button>
+                  <button className="button-secondary" type="button" onClick={() => {
+                    setWeeklyDraft(overview.latest_insight?.content_vi || "");
+                    setEditingNote(false);
+                  }}>
+                    Hủy sửa
+                  </button>
+                </>
+              ) : (
+                <button className="button-secondary" type="button" onClick={() => setEditingNote(true)}>
+                  Chỉnh sửa tay
+                </button>
+              )}
+            </div>
+          ) : null}
         </div>
       </div>
 
@@ -188,32 +191,34 @@ export default function OverviewTab({
             ))}
           </div>
 
-          <form className="mt-5 space-y-3 rounded-[28px] border border-white/10 bg-black/10 p-4" onSubmit={onAddEvent}>
-            <p className="text-sm font-semibold text-white">Thêm sự kiện thủ công</p>
-            <div className="grid gap-3 md:grid-cols-2">
-              <input
-                className="input-dark"
-                type="date"
-                value={manualEvent.event_date}
-                onChange={(event) => setManualEvent({ ...manualEvent, event_date: event.target.value })}
+          {!readOnly ? (
+            <form className="mt-5 space-y-3 rounded-[28px] border border-white/10 bg-black/10 p-4" onSubmit={onAddEvent}>
+              <p className="text-sm font-semibold text-white">Thêm sự kiện thủ công</p>
+              <div className="grid gap-3 md:grid-cols-2">
+                <input
+                  className="input-dark"
+                  type="date"
+                  value={manualEvent.event_date}
+                  onChange={(event) => setManualEvent({ ...manualEvent, event_date: event.target.value })}
+                />
+                <input
+                  className="input-dark"
+                  value={manualEvent.title}
+                  onChange={(event) => setManualEvent({ ...manualEvent, title: event.target.value })}
+                  placeholder="Ví dụ: Triển khai on-page 5 bài SEO"
+                />
+              </div>
+              <textarea
+                className="input-dark min-h-24"
+                value={manualEvent.description}
+                onChange={(event) => setManualEvent({ ...manualEvent, description: event.target.value })}
+                placeholder="Mô tả ngắn tác động hoặc phạm vi thay đổi"
               />
-              <input
-                className="input-dark"
-                value={manualEvent.title}
-                onChange={(event) => setManualEvent({ ...manualEvent, title: event.target.value })}
-                placeholder="Ví dụ: Triển khai on-page 5 bài SEO"
-              />
-            </div>
-            <textarea
-              className="input-dark min-h-24"
-              value={manualEvent.description}
-              onChange={(event) => setManualEvent({ ...manualEvent, description: event.target.value })}
-              placeholder="Mô tả ngắn tác động hoặc phạm vi thay đổi"
-            />
-            <button className="button-secondary" type="submit" disabled={addingEvent || !manualEvent.title || !manualEvent.event_date}>
-              {addingEvent ? "Đang lưu..." : "Lưu sự kiện"}
-            </button>
-          </form>
+              <button className="button-secondary" type="submit" disabled={addingEvent || !manualEvent.title || !manualEvent.event_date}>
+                {addingEvent ? "Đang lưu..." : "Lưu sự kiện"}
+              </button>
+            </form>
+          ) : null}
         </div>
       </div>
 

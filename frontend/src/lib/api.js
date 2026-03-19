@@ -175,6 +175,30 @@ export function createWeeklyInsight(token, projectId) {
   return request(`/api/projects/${projectId}/insights/weekly`, { token, method: "POST" });
 }
 
+export function generateDailyNote(token, projectId, payload) {
+  return request(`/api/projects/${projectId}/insights/daily-note/generate`, {
+    token,
+    method: "POST",
+    body: payload,
+  });
+}
+
+export function pinDailyNote(token, projectId, payload) {
+  return request(`/api/projects/${projectId}/insights/daily-note/pin`, {
+    token,
+    method: "POST",
+    body: payload,
+  });
+}
+
+export function unpinDailyNote(token, projectId, insightDate) {
+  const query = buildQuery({ insight_date: insightDate });
+  return request(`/api/projects/${projectId}/insights/daily-note/pin?${query.toString()}`, {
+    token,
+    method: "DELETE",
+  });
+}
+
 export function saveWeeklyNote(token, projectId, content) {
   return request(`/api/projects/${projectId}/insights/weekly-note`, {
     token,
@@ -193,6 +217,14 @@ export function createClusterInsight(token, projectId, clusterName) {
 
 export function createClientViewShare(token, projectId, payload) {
   return request(`/api/projects/${projectId}/shares/client-view`, {
+    token,
+    method: "POST",
+    body: payload,
+  });
+}
+
+export function createSeoViewShare(token, projectId, payload) {
+  return request(`/api/projects/${projectId}/shares/seo-view`, {
     token,
     method: "POST",
     body: payload,
@@ -234,6 +266,10 @@ export function getPublicShare(shareToken, params = {}, token = "") {
   const query = buildQuery(params);
   const suffix = query.toString() ? `?${query.toString()}` : "";
   return request(`/api/public/${shareToken}${suffix}`, { token });
+}
+
+export function getPublicKeywordDetail(shareToken, keywordId, token = "") {
+  return request(`/api/public/${shareToken}/keywords/${keywordId}`, { token });
 }
 
 export function loginPublicShare(shareToken, password) {

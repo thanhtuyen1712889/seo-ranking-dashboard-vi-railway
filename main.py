@@ -282,6 +282,48 @@ def weekly_insight(project_id: int, _: dict[str, Any] = Depends(require_auth)) -
     return service.generate_weekly_summary(project_id, force=True)
 
 
+@app.post("/api/projects/{project_id}/insights/daily-note/generate")
+def generate_daily_note(
+    project_id: int,
+    payload: dict[str, Any] = Body(default={}),
+    _: dict[str, Any] = Depends(require_auth),
+) -> dict[str, Any]:
+    insight_date = str(payload.get("insight_date") or "").strip()
+    if not insight_date:
+        raise HTTPException(status_code=400, detail="Thiếu ngày cần tạo nhận xét.")
+    return service.generate_daily_note(
+        project_id,
+        insight_date,
+        str(payload.get("seo_input") or ""),
+    )
+
+
+@app.post("/api/projects/{project_id}/insights/daily-note/pin")
+def pin_daily_note(
+    project_id: int,
+    payload: dict[str, Any] = Body(default={}),
+    _: dict[str, Any] = Depends(require_auth),
+) -> dict[str, Any]:
+    insight_date = str(payload.get("insight_date") or "").strip()
+    if not insight_date:
+        raise HTTPException(status_code=400, detail="Thiếu ngày cần ghim ghi chú.")
+    return service.save_pinned_daily_note(
+        project_id,
+        insight_date,
+        str(payload.get("content") or ""),
+        str(payload.get("seo_input") or ""),
+    )
+
+
+@app.delete("/api/projects/{project_id}/insights/daily-note/pin")
+def unpin_daily_note(
+    project_id: int,
+    insight_date: str = Query(...),
+    _: dict[str, Any] = Depends(require_auth),
+) -> dict[str, bool]:
+    return service.remove_pinned_daily_note(project_id, insight_date)
+
+
 @app.post("/api/projects/{project_id}/insights/weekly-note")
 def save_weekly_note(
     project_id: int,
@@ -312,6 +354,15 @@ def create_client_view(
     return service.create_client_view_share(project_id, payload)
 
 
+@app.post("/api/projects/{project_id}/shares/seo-view")
+def create_seo_view(
+    project_id: int,
+    payload: dict[str, Any] = Body(default={}),
+    _: dict[str, Any] = Depends(require_auth),
+) -> dict[str, Any]:
+    return service.create_seo_view_share(project_id, payload)
+
+
 @app.post("/api/projects/{project_id}/shares/report-snapshot")
 def create_report_snapshot(
     project_id: int,
@@ -333,13 +384,66 @@ def public_share_login(
 @app.get("/api/public/{share_token}")
 def public_share_payload(
     share_token: str,
+    group_current_date: str | None = Query(default=None),
+    group_baseline_date: str | None = Query(default=None),
+    group_status: str = Query(default=""),
+    group_main_cluster: str | None = Query(default=None),
+    group_tag: str = Query(default=""),
+    group_sort_by: str = Query(default=""),
     active_scenario_id: str | None = Query(default=None),
+    keyword_current_date: str | None = Query(default=None),
+    keyword_search: str = Query(default=""),
+    keyword_groups: str = Query(default=""),
+    keyword_clusters: str = Query(default=""),
+    keyword_status: str = Query(default=""),
+    keyword_vol_min: int | None = Query(default=None),
+    keyword_vol_max: int | None = Query(default=None),
+    keyword_rank_min: float | None = Query(default=None),
+    keyword_rank_max: float | None = Query(default=None),
+    keyword_movers_only: bool | None = Query(default=None),
+    keyword_sort_by: str = Query(default=""),
+    keyword_sort_dir: str = Query(default=""),
     credentials: HTTPAuthorizationCredentials | None = Depends(security),
 ) -> dict[str, Any]:
     return service.get_public_share_payload(
         share_token,
         public_token=credentials.credentials if credentials else None,
-        active_scenario_id=active_scenario_id,
+        group_filters={
+            "current_date": group_current_date,
+            "baseline_date": group_baseline_date,
+            "status": group_status,
+            "main_cluster": group_main_cluster,
+            "tag": group_tag,
+            "sort_by": group_sort_by,
+            "active_scenario_id": active_scenario_id,
+        },
+        keyword_filters={
+            "current_date": keyword_current_date,
+            "search": keyword_search,
+            "groups": keyword_groups,
+            "clusters": keyword_clusters,
+            "status": keyword_status,
+            "vol_min": keyword_vol_min,
+            "vol_max": keyword_vol_max,
+            "rank_min": keyword_rank_min,
+            "rank_max": keyword_rank_max,
+            "movers_only": keyword_movers_only,
+            "sort_by": keyword_sort_by,
+            "sort_dir": keyword_sort_dir,
+        },
+    )
+
+
+@app.get("/api/public/{share_token}/keywords/{keyword_id}")
+def public_keyword_detail(
+    share_token: str,
+    keyword_id: int,
+    credentials: HTTPAuthorizationCredentials | None = Depends(security),
+) -> dict[str, Any]:
+    return service.get_public_keyword_detail(
+        share_token,
+        keyword_id,
+        public_token=credentials.credentials if credentials else None,
     )
 
 
@@ -415,6 +519,11 @@ def value_error_handler(_: Any, exc: ValueError) -> JSONResponse:
 if FRONTEND_DIST.exists():
     @app.get("/client/{share_token}")
     def client_view_page(share_token: str) -> FileResponse:
+        return FileResponse(FRONTEND_DIST / "index.html")
+
+
+    @app.get("/seo/{share_token}")
+    def seo_view_page(share_token: str) -> FileResponse:
         return FileResponse(FRONTEND_DIST / "index.html")
 
 

@@ -20,6 +20,7 @@ export default function KeywordDrawer({
   onSaveNotes,
   onGenerateInsight,
   savingNotes,
+  readOnly = false,
 }) {
   if (!open || !detail) return null;
 
@@ -100,28 +101,32 @@ export default function KeywordDrawer({
                 {detail.latest_insight?.content_vi || "Chưa có insight cho keyword này."}
               </p>
             </div>
-            <button className="button-secondary shrink-0" type="button" onClick={onGenerateInsight} disabled={insightLoading}>
-              {insightLoading ? "Đang tạo..." : "Tạo insight"}
-            </button>
+            {!readOnly ? (
+              <button className="button-secondary shrink-0" type="button" onClick={onGenerateInsight} disabled={insightLoading}>
+                {insightLoading ? "Đang tạo..." : "Tạo insight"}
+              </button>
+            ) : null}
           </div>
         </div>
 
         <div className="mt-6 rounded-[32px] border border-white/10 bg-white/[0.03] p-5">
-          <p className="text-sm font-semibold text-white">Ghi chú nội bộ</p>
+          <p className="text-sm font-semibold text-white">{readOnly ? "Ghi chú hiện có" : "Ghi chú nội bộ"}</p>
           <textarea
             className="input-dark mt-3 min-h-28"
             value={noteDraft}
             onChange={(event) => setNoteDraft(event.target.value)}
-            placeholder="Thêm ghi chú cho keyword này"
+            placeholder={readOnly ? "Chưa có ghi chú cho keyword này" : "Thêm ghi chú cho keyword này"}
+            readOnly={readOnly}
           />
-          <div className="mt-3 flex justify-end">
-            <button className="button-primary" type="button" onClick={onSaveNotes} disabled={savingNotes}>
-              {savingNotes ? "Đang lưu..." : "Lưu ghi chú"}
-            </button>
-          </div>
+          {!readOnly ? (
+            <div className="mt-3 flex justify-end">
+              <button className="button-primary" type="button" onClick={onSaveNotes} disabled={savingNotes}>
+                {savingNotes ? "Đang lưu..." : "Lưu ghi chú"}
+              </button>
+            </div>
+          ) : null}
         </div>
       </div>
     </div>
   );
 }
-

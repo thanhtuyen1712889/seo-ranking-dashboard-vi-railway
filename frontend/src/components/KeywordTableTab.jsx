@@ -8,6 +8,8 @@ export default function KeywordTableTab({
   onExport,
   exporting,
   onOpenKeyword,
+  readOnly = false,
+  showExportButton = true,
 }) {
   if (!data) {
     return null;
@@ -99,11 +101,13 @@ export default function KeywordTableTab({
           </label>
         </div>
 
-        <div className="mt-4 flex flex-wrap gap-3">
-          <button className="button-secondary" type="button" onClick={onExport} disabled={exporting}>
-            {exporting ? "Đang xuất..." : "Tải view đã lọc xuống Excel"}
-          </button>
-        </div>
+        {showExportButton ? (
+          <div className="mt-4 flex flex-wrap gap-3">
+            <button className="button-secondary" type="button" onClick={onExport} disabled={exporting}>
+              {exporting ? "Đang xuất..." : "Tải view đã lọc xuống Excel"}
+            </button>
+          </div>
+        ) : null}
       </div>
 
       <div className="panel-grid overflow-hidden p-0">
@@ -135,7 +139,11 @@ export default function KeywordTableTab({
             </thead>
             <tbody>
               {data.rows.map((row) => (
-                <tr key={row.id} className="cursor-pointer transition hover:bg-white/[0.03]" onClick={() => onOpenKeyword(row.id)}>
+                <tr
+                  key={row.id}
+                  className={`${onOpenKeyword ? "cursor-pointer transition hover:bg-white/[0.03]" : ""}`}
+                  onClick={onOpenKeyword ? () => onOpenKeyword(row.id) : undefined}
+                >
                   <td {...stickyProps(0)} className={`${stickyProps(0).className} border-b border-white/5 px-4 py-4 text-slate-400`}>{row.index}</td>
                   <td {...stickyProps(1)} className={`${stickyProps(1).className} border-b border-white/5 px-4 py-4 text-slate-300`}>{row.group_name}</td>
                   <td {...stickyProps(2)} className={`${stickyProps(2).className} border-b border-white/5 px-4 py-4`}>

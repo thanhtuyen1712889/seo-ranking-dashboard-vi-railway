@@ -399,7 +399,12 @@ class DashboardService:
         return "http://localhost:8000"
 
     def _share_url(self, share_type: str, share_token: str) -> str:
-        path = "client" if share_type == "client_view" else "report"
+        path_map = {
+            "client_view": "client",
+            "seo_view": "seo",
+            "report_snapshot": "report",
+        }
+        path = path_map.get(share_type, "client")
         return f"{self._public_base_url()}/{path}/{share_token}"
 
     def _share_payload(self, row: Any) -> dict[str, Any]:
@@ -422,15 +427,50 @@ class DashboardService:
             ).fetchall()
         latest: dict[str, str | None] = {
             "client_view_url": None,
+            "seo_view_url": None,
             "report_snapshot_url": None,
         }
         for row in rows:
             share_type = row["share_type"]
             if share_type == "client_view" and not latest["client_view_url"]:
                 latest["client_view_url"] = self._share_url(share_type, row["share_token"])
+            if share_type == "seo_view" and not latest["seo_view_url"]:
+                latest["seo_view_url"] = self._share_url(share_type, row["share_token"])
             if share_type == "report_snapshot" and not latest["report_snapshot_url"]:
                 latest["report_snapshot_url"] = self._share_url(share_type, row["share_token"])
         return latest
+
+    def _safe_public_project(self, project: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": project.get("id"),
+            "name": project.get("name"),
+            "source_name": project.get("source_name"),
+            "source_type": project.get("source_type"),
+            "last_pulled_at": project.get("last_pulled_at"),
+            "created_at": project.get("created_at"),
+        }
+
+    def _sanitize_public_overview(self, overview: dict[str, Any]) -> dict[str, Any]:
+        payload = dict(overview)
+        payload.pop("projects", None)
+        project = payload.get("project")
+        if isinstance(project, dict):
+            payload["project"] = self._safe_public_project(project)
+        return payload
+
+    def _public_view_mode(self, share_type: str, state: dict[str, Any] | None = None) -> str:
+        if share_type == "client_view":
+            return "client"
+        if share_type == "seo_view":
+            return "team"
+        normalized_state = self._normalize_view_state(state)
+        return normalized_state.get("mode") or "client"
+
+    def _public_available_tabs(self, view_mode: str, keyword_table: dict[str, Any] | None) -> list[str]:
+        tabs = ["overview", "groups"]
+        if view_mode == "team" and keyword_table is not None:
+            tabs.append("keywords")
+        return tabs
 
     def list_projects(self) -> list[dict[str, Any]]:
         with get_connection() as connection:
@@ -898,13 +938,12 @@ class DashboardService:
         incoming_state: dict[str, Any] | None,
     ) -> dict[str, Any]:
         project = self.get_project(project_id)
-        merged_state = self._merge_view_state(project.get("saved_view_state"), incoming_state)
-        self.update_project_view_state(project_id, merged_state)
-        return merged_state
+        return self._merge_view_state(project.get("saved_view_state"), incoming_state)
 
     def _build_snapshot_bundle(self, project_id: int, view_state: dict[str, Any]) -> dict[str, Any]:
         group_filters = view_state.get("group_filters", {})
-        overview = self.get_overview(project_id)
+        keyword_filters = view_state.get("keyword_filters", {})
+        overview = self._sanitize_public_overview(self.get_overview(project_id))
         base_group_view = self.get_group_view(
             project_id,
             current_date=group_filters.get("current_date") or None,
@@ -927,11 +966,17 @@ class DashboardService:
                 sort_by=group_filters.get("sort_by") or "health_score",
                 active_scenario_id=scenario["scenario_id"],
             )
+        keyword_table = (
+            self.get_keyword_table(project_id, keyword_filters)
+            if self._public_view_mode("report_snapshot", view_state) == "team"
+            else None
+        )
         return {
-            "project": self.get_project(project_id),
+            "project": self._safe_public_project(self.get_project(project_id)),
             "overview": overview,
             "view_state": view_state,
             "group_views": scenario_views,
+            "keyword_table": keyword_table,
             "created_at": now_iso(),
         }
 
@@ -946,12 +991,23 @@ class DashboardService:
     ) -> dict[str, Any]:
         project = self.get_project(project_id)
         view_state = self._share_state_payload(project_id, state)
+        if share_type == "client_view":
+            view_state["mode"] = "client"
+            if view_state.get("active_tab") == "keywords":
+                view_state["active_tab"] = "overview"
+        elif share_type == "seo_view":
+            view_state["mode"] = "team"
         snapshot_json = None
         if share_type == "report_snapshot":
             snapshot_json = self._build_snapshot_bundle(project_id, view_state)
         share_token = secrets.token_urlsafe(18)
         current_time = now_iso()
         resolved_password = (password or "").strip()
+        default_titles = {
+            "client_view": f"{project['name']} · Cổng khách hàng",
+            "seo_view": f"{project['name']} · Cổng SEO",
+            "report_snapshot": f"{project['name']} · Report snapshot",
+        }
         with transaction() as connection:
             cursor = connection.execute(
                 """
@@ -965,7 +1021,7 @@ class DashboardService:
                     project_id,
                     share_type,
                     share_token,
-                    (title or "").strip() or f"{project['name']} · {'Client view' if share_type == 'client_view' else 'Report snapshot'}",
+                    (title or "").strip() or default_titles.get(share_type, f"{project['name']} · Link chia sẻ"),
                     hash_view_password(resolved_password) if resolved_password else None,
                     json.dumps(view_state, ensure_ascii=True),
                     json.dumps(snapshot_json, ensure_ascii=True) if snapshot_json is not None else None,
@@ -983,7 +1039,9 @@ class DashboardService:
             "share_type": share_type,
             "title": share["title"],
             "client_view_url": share["url"] if share_type == "client_view" else self._latest_share_links(project_id)["client_view_url"],
-            "client_view_password": resolved_password or None,
+            "client_view_password": (resolved_password or None) if share_type == "client_view" else None,
+            "seo_view_url": share["url"] if share_type == "seo_view" else self._latest_share_links(project_id)["seo_view_url"],
+            "seo_view_password": (resolved_password or None) if share_type == "seo_view" else None,
             "report_snapshot_url": share["url"] if share_type == "report_snapshot" else self._latest_share_links(project_id)["report_snapshot_url"],
             "created_at": share["created_at"],
             "active_scenario_id": view_state.get("group_filters", {}).get("active_scenario_id") or None,
@@ -993,6 +1051,15 @@ class DashboardService:
         return self._create_share(
             project_id,
             share_type="client_view",
+            title=payload.get("title"),
+            password=payload.get("password"),
+            state=payload.get("state"),
+        )
+
+    def create_seo_view_share(self, project_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+        return self._create_share(
+            project_id,
+            share_type="seo_view",
             title=payload.get("title"),
             password=payload.get("password"),
             state=payload.get("state"),
@@ -1016,12 +1083,104 @@ class DashboardService:
             "expires_in_seconds": PUBLIC_VIEW_TTL_SECONDS,
         }
 
+    def _public_payload_base(self, share: dict[str, Any], view_state: dict[str, Any], keyword_table: dict[str, Any] | None) -> dict[str, Any]:
+        view_mode = self._public_view_mode(share["share_type"], view_state)
+        active_tab = view_state.get("active_tab") or "overview"
+        if view_mode == "client" and active_tab == "keywords":
+            active_tab = "overview"
+        return {
+            "requires_password": False,
+            "share_type": share["share_type"],
+            "title": share["title"],
+            "project_id": str(share["project_id"]),
+            "project_name": self.get_project(share["project_id"])["name"],
+            "view_mode": view_mode,
+            "available_tabs": self._public_available_tabs(view_mode, keyword_table),
+            "view_state": {
+                **view_state,
+                "active_tab": active_tab,
+                "mode": view_mode,
+            },
+            "snapshot_created_at": share["created_at"],
+        }
+
+    def _build_public_live_payload(
+        self,
+        share: dict[str, Any],
+        *,
+        group_filters: dict[str, Any] | None = None,
+        keyword_filters: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        merged_state = self._merge_view_state(
+            share.get("state_json"),
+            {
+                "group_filters": group_filters or {},
+                "keyword_filters": keyword_filters or {},
+            },
+        )
+        overview = self._sanitize_public_overview(self.get_overview(share["project_id"]))
+        current_group_filters = merged_state.get("group_filters", {})
+        current_keyword_filters = merged_state.get("keyword_filters", {})
+        group_view = self.get_group_view(
+            share["project_id"],
+            current_date=current_group_filters.get("current_date") or None,
+            baseline_date=current_group_filters.get("baseline_date") or None,
+            status_filter=current_group_filters.get("status") or "all",
+            main_cluster=current_group_filters.get("main_cluster") or None,
+            tag_filter=current_group_filters.get("tag") or "all",
+            sort_by=current_group_filters.get("sort_by") or "health_score",
+            active_scenario_id=current_group_filters.get("active_scenario_id") or None,
+        )
+        keyword_table = (
+            self.get_keyword_table(share["project_id"], current_keyword_filters)
+            if self._public_view_mode(share["share_type"], merged_state) == "team"
+            else None
+        )
+        payload = self._public_payload_base(share, merged_state, keyword_table)
+        payload.update(
+            {
+                "overview": overview,
+                "group_view": group_view,
+                "keyword_table": keyword_table,
+            }
+        )
+        return payload
+
+    def _build_public_snapshot_payload(
+        self,
+        share: dict[str, Any],
+        *,
+        active_scenario_id: str | None = None,
+    ) -> dict[str, Any]:
+        snapshot = share.get("snapshot_json") or {}
+        view_state = self._normalize_view_state(snapshot.get("view_state") or share.get("state_json"))
+        group_views = snapshot.get("group_views") or {}
+        requested_scenario_id = active_scenario_id or view_state.get("group_filters", {}).get("active_scenario_id")
+        selected_group_view = None
+        if requested_scenario_id:
+            selected_group_view = group_views.get(requested_scenario_id)
+        if selected_group_view is None and group_views:
+            selected_group_view = next(iter(group_views.values()))
+        keyword_table = snapshot.get("keyword_table")
+        payload = self._public_payload_base(share, view_state, keyword_table)
+        payload.update(
+            {
+                "project_name": (snapshot.get("project") or {}).get("name") or payload["project_name"],
+                "overview": snapshot.get("overview") or self._sanitize_public_overview(self.get_overview(share["project_id"])),
+                "group_view": selected_group_view,
+                "keyword_table": keyword_table,
+                "snapshot_created_at": snapshot.get("created_at") or share["created_at"],
+            }
+        )
+        return payload
+
     def get_public_share_payload(
         self,
         share_token: str,
         *,
         public_token: str | None = None,
-        active_scenario_id: str | None = None,
+        group_filters: dict[str, Any] | None = None,
+        keyword_filters: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         share = self._load_share(share_token)
         requires_password = bool(share.get("password_hash"))
@@ -1036,50 +1195,34 @@ class DashboardService:
                     "project_id": str(share["project_id"]),
                 }
         if share["share_type"] == "report_snapshot":
-            snapshot = share.get("snapshot_json") or {}
-            group_views = snapshot.get("group_views") or {}
-            requested_scenario_id = active_scenario_id or snapshot.get("view_state", {}).get("group_filters", {}).get("active_scenario_id")
-            selected_group_view = None
-            if requested_scenario_id:
-                selected_group_view = group_views.get(requested_scenario_id)
-            if selected_group_view is None and group_views:
-                selected_group_view = next(iter(group_views.values()))
-            overview = snapshot.get("overview") or self.get_overview(share["project_id"])
-            return {
-                "requires_password": False,
-                "share_type": share["share_type"],
-                "title": share["title"],
-                "project_id": str(share["project_id"]),
-                "project_name": (snapshot.get("project") or {}).get("name") or self.get_project(share["project_id"])["name"],
-                "view_state": snapshot.get("view_state") or share.get("state_json") or {},
-                "overview": overview,
-                "group_view": selected_group_view,
-                "snapshot_created_at": snapshot.get("created_at") or share["created_at"],
-            }
-
-        state = share.get("state_json") or {}
-        group_filters = state.get("group_filters", {})
-        current_group_view = self.get_group_view(
-            share["project_id"],
-            current_date=group_filters.get("current_date") or None,
-            baseline_date=group_filters.get("baseline_date") or None,
-            status_filter=group_filters.get("status") or "all",
-            main_cluster=group_filters.get("main_cluster") or None,
-            tag_filter=group_filters.get("tag") or "all",
-            sort_by=group_filters.get("sort_by") or "health_score",
-            active_scenario_id=active_scenario_id or group_filters.get("active_scenario_id") or None,
+            requested_scenario_id = (
+                (group_filters or {}).get("active_scenario_id")
+                or (group_filters or {}).get("sub_cluster_mode")
+                or None
+            )
+            return self._build_public_snapshot_payload(
+                share,
+                active_scenario_id=requested_scenario_id,
+            )
+        return self._build_public_live_payload(
+            share,
+            group_filters=group_filters,
+            keyword_filters=keyword_filters,
         )
-        return {
-            "requires_password": False,
-            "share_type": share["share_type"],
-            "title": share["title"],
-            "project_id": str(share["project_id"]),
-            "project_name": self.get_project(share["project_id"])["name"],
-            "view_state": state,
-            "overview": self.get_overview(share["project_id"]),
-            "group_view": current_group_view,
-            "snapshot_created_at": share["created_at"],
-        }
+
+    def get_public_keyword_detail(
+        self,
+        share_token: str,
+        keyword_id: int,
+        *,
+        public_token: str | None = None,
+    ) -> dict[str, Any]:
+        share = self._load_share(share_token)
+        if share["share_type"] != "seo_view":
+            raise ValueError("Link này không hỗ trợ mở chi tiết keyword.")
+        if share.get("password_hash"):
+            verify_public_view_token(public_token or "", share_token)
+        return self.get_keyword_detail(share["project_id"], keyword_id)
 
     def recluster_keywords(self, project_id: int) -> dict[str, Any]:
         with transaction() as connection:
@@ -1161,6 +1304,23 @@ class DashboardService:
             insight = dict(row)
             latest.setdefault(insight["insight_type"], insight)
         return latest
+
+    def _load_pinned_date_notes(self, project_id: int) -> dict[str, dict[str, Any]]:
+        with get_connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT *
+                FROM ai_insights
+                WHERE project_id = ? AND insight_type = 'pinned_daily_note'
+                ORDER BY generated_at DESC
+                """,
+                (project_id,),
+            ).fetchall()
+        pinned: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            insight = dict(row)
+            pinned.setdefault(insight["insight_date"], insight)
+        return pinned
 
     def _history_position(self, history: list[dict[str, Any]], rank_date: str) -> float | None:
         for item in history:
@@ -1250,6 +1410,103 @@ class DashboardService:
             entry["percent"] = round((entry["achieved"] / entry["keyword_count"]) * 100, 1) if entry["keyword_count"] else 0
             entry["status"] = "đạt" if entry["achieved"] == entry["keyword_count"] else "chưa đạt"
         return metrics
+
+    def _date_note_context(self, project_id: int, insight_date: str) -> dict[str, Any]:
+        dates = self.get_project_dates(project_id)
+        if not dates:
+            raise ValueError("Project chưa có dữ liệu để tạo nhận xét.")
+        if insight_date not in dates:
+            raise ValueError("Ngày nhận xét không nằm trong dataset hiện tại.")
+        date_index = dates.index(insight_date)
+        previous_date = dates[date_index - 1] if date_index > 0 else None
+        keywords = self._load_keywords_with_history(project_id)
+        group_metrics = self._build_group_metrics(keywords, insight_date, previous_date)
+        group_rows = [
+            {
+                "name": name,
+                "keyword_count": metric["keyword_count"],
+                "achieved": metric["achieved"],
+                "kpi_target": metric["kpi_target"],
+                "avg_rank_current": metric["avg_rank"],
+                "avg_rank_previous": metric["avg_prev_rank"],
+                "avg_delta": metric["avg_delta"],
+                "percent": metric["percent"],
+            }
+            for name, metric in group_metrics.items()
+        ]
+        movers_up: list[dict[str, Any]] = []
+        movers_down: list[dict[str, Any]] = []
+        kpi_hits: list[str] = []
+        rank_distribution = {"Top 1-3": 0, "Top 4-5": 0, "Top 6-10": 0, "Top 11-20": 0, "Top 21+": 0}
+        for keyword in keywords:
+            current_rank = self._history_position(keyword["history"], insight_date)
+            previous_rank = self._history_position(keyword["history"], previous_date) if previous_date else None
+            if current_rank is None:
+                continue
+            if current_rank <= 3:
+                rank_distribution["Top 1-3"] += 1
+            elif current_rank <= 5:
+                rank_distribution["Top 4-5"] += 1
+            elif current_rank <= 10:
+                rank_distribution["Top 6-10"] += 1
+            elif current_rank <= 20:
+                rank_distribution["Top 11-20"] += 1
+            else:
+                rank_distribution["Top 21+"] += 1
+            if previous_rank is None:
+                continue
+            delta = round(float(previous_rank - current_rank), 2)
+            mover_payload = {
+                "keyword": keyword["keyword"],
+                "group_name": keyword.get("group_name") or "Chưa phân nhóm",
+                "delta": delta,
+                "current_rank": current_rank,
+                "previous_rank": previous_rank,
+            }
+            if delta >= 1:
+                movers_up.append(mover_payload)
+            elif delta <= -1:
+                movers_down.append(mover_payload)
+            kpi_target = int(keyword.get("kpi_target") or 10)
+            if current_rank <= kpi_target < previous_rank:
+                kpi_hits.append(keyword["keyword"])
+        movers_up.sort(key=lambda item: (item["delta"], -float(item["current_rank"])), reverse=True)
+        movers_down.sort(key=lambda item: item["delta"])
+        events = [event for event in self._load_events(project_id) if event["event_date"] == insight_date][:5]
+        return {
+            "insight_date": insight_date,
+            "compare_date": previous_date,
+            "group_rows": group_rows,
+            "movers_up": movers_up[:5],
+            "movers_down": movers_down[:5],
+            "kpi_hits": kpi_hits[:10],
+            "events": events,
+            "rank_distribution": rank_distribution,
+        }
+
+    def _fallback_date_note(self, context: dict[str, Any], seo_input: str = "") -> str:
+        group_rows = context["group_rows"]
+        if not group_rows:
+            return "Tổng quan: Chưa đủ dữ liệu để tạo nhận xét cho ngày này."
+        strongest = min(
+            group_rows,
+            key=lambda item: item["avg_delta"] if item["avg_delta"] is not None else 999,
+        )
+        weakest = max(
+            group_rows,
+            key=lambda item: item["avg_delta"] if item["avg_delta"] is not None else -999,
+        )
+        brightest = context["movers_up"][0]["keyword"] if context["movers_up"] else strongest["name"]
+        risky = context["movers_down"][0]["keyword"] if context["movers_down"] else weakest["name"]
+        kpi_text = ", ".join(context["kpi_hits"][:3]) if context["kpi_hits"] else "chưa có từ khóa mới vượt KPI"
+        event_text = context["events"][0]["title"] if context["events"] else "chưa có cảnh báo bất thường"
+        extra = f" Ghi chú thêm từ SEO team: {seo_input.strip()}." if seo_input.strip() else ""
+        return (
+            f"Tổng quan: Ngày {format_date_label(context['insight_date'])}, {strongest['name']} là nhóm giữ nhịp tích cực hơn mặt bằng chung, còn {weakest['name']} cần theo dõi thêm.\n"
+            f"Điểm sáng: {brightest} là tín hiệu tốt nhất ở mốc này với mức cải thiện rõ rệt hơn kỳ so sánh.\n"
+            f"Điểm cần chú ý: {risky} hoặc nhóm {weakest['name']} đang kéo hiệu suất đi xuống; đồng thời {event_text.lower()}.\n"
+            f"Nhận định: Dữ liệu hiện cho thấy {kpi_text} và xu hướng đang phân hoá khá rõ theo từng bộ từ khóa.{extra}"
+        )
 
     def _extract_candidate_ngram_pairs(self, text: str) -> list[tuple[str, str]]:
         display_tokens = _display_tokens(text)
@@ -2092,6 +2349,7 @@ class DashboardService:
         keywords = self._load_keywords_with_history(project_id)
         dates = self.get_project_dates(project_id)
         latest_insights = self._load_latest_insights(project_id)
+        pinned_notes = self._load_pinned_date_notes(project_id)
         events = self._load_events(project_id)
         if not dates:
             return {
@@ -2106,6 +2364,7 @@ class DashboardService:
                 "avg_trend": [],
                 "events": events,
                 "latest_insight": latest_insights.get("weekly_summary"),
+                "pinned_notes": {},
             }
         latest_date = dates[-1]
         previous_date = dates[-2] if len(dates) >= 2 else None
@@ -2217,6 +2476,7 @@ class DashboardService:
             "donut": donut,
             "distribution": [{"name": key, "value": value} for key, value in distribution_buckets.items()],
             "avg_trend": avg_trend,
+            "pinned_notes": pinned_notes,
         }
 
     def get_group_view(
@@ -2494,6 +2754,81 @@ class DashboardService:
             )
             row = connection.execute("SELECT * FROM ai_insights WHERE id = ?", (int(cursor.lastrowid),)).fetchone()
         return dict(row)
+
+    def generate_daily_note(self, project_id: int, insight_date: str, seo_input: str = "") -> dict[str, Any]:
+        context = self._date_note_context(project_id, insight_date)
+        prompt = (
+            "Bạn là SEO analyst. Dưới đây là snapshot dữ liệu dashboard SEO theo ngày:\n"
+            f"{context}\n"
+            f"Ghi chú thêm từ team SEO (nếu có): {seo_input.strip() or 'không có'}\n"
+            "Hãy viết nhận xét ngắn gọn bằng tiếng Việt theo format:\n"
+            "- Tổng quan: [1 câu tóm tắt cho ngày đang chọn]\n"
+            "- Điểm sáng: [group/keyword tăng tốt nhất theo dữ liệu]\n"
+            "- Điểm cần chú ý: [group/keyword giảm hoặc cảnh báo]\n"
+            "- Nhận định: [mẫu xu hướng hoặc hành động nên ưu tiên]\n"
+            "Ngắn gọn, đọc dễ, bám sát dữ liệu thật."
+        )
+        api_key = self._project_api_key(project_id)
+        content = call_claude(prompt, api_key) or self._fallback_date_note(context, seo_input)
+        return {
+            "insight_date": insight_date,
+            "compare_date": context["compare_date"],
+            "content_vi": content,
+            "generated_at": now_iso(),
+            "is_pinned": False,
+            "seo_input": seo_input.strip(),
+        }
+
+    def save_pinned_daily_note(
+        self,
+        project_id: int,
+        insight_date: str,
+        content: str,
+        seo_input: str = "",
+    ) -> dict[str, Any]:
+        if insight_date not in self.get_project_dates(project_id):
+            raise ValueError("Ngày cần ghim không nằm trong dataset hiện tại.")
+        note = content.strip()
+        if not note:
+            raise ValueError("Nội dung ghi chú không được để trống.")
+        with transaction() as connection:
+            connection.execute(
+                """
+                DELETE FROM ai_insights
+                WHERE project_id = ? AND insight_type = 'pinned_daily_note' AND insight_date = ?
+                """,
+                (project_id, insight_date),
+            )
+            cursor = connection.execute(
+                """
+                INSERT INTO ai_insights (
+                    project_id, insight_date, insight_type, cluster_name, keyword, content_vi, generated_at
+                )
+                VALUES (?, ?, 'pinned_daily_note', NULL, ?, ?, ?)
+                """,
+                (
+                    project_id,
+                    insight_date,
+                    seo_input.strip() or None,
+                    note,
+                    now_iso(),
+                ),
+            )
+            row = connection.execute("SELECT * FROM ai_insights WHERE id = ?", (int(cursor.lastrowid),)).fetchone()
+        result = dict(row)
+        result["is_pinned"] = True
+        return result
+
+    def remove_pinned_daily_note(self, project_id: int, insight_date: str) -> dict[str, bool]:
+        with transaction() as connection:
+            connection.execute(
+                """
+                DELETE FROM ai_insights
+                WHERE project_id = ? AND insight_type = 'pinned_daily_note' AND insight_date = ?
+                """,
+                (project_id, insight_date),
+            )
+        return {"ok": True}
 
     def generate_weekly_summary(self, project_id: int, *, force: bool = True) -> dict[str, Any]:
         dates = self.get_project_dates(project_id)
