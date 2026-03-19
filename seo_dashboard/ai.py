@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime
 from typing import Any
 
 try:
@@ -10,6 +11,15 @@ except ModuleNotFoundError:  # pragma: no cover - depends on environment
 
 
 DEFAULT_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022")
+
+
+def short_date_label(value: str | None) -> str:
+    if not value:
+        return "--"
+    try:
+        return datetime.fromisoformat(value).strftime("%d/%m")
+    except ValueError:
+        return value
 
 
 def call_claude(prompt: str, api_key: str | None) -> str | None:
@@ -56,8 +66,8 @@ def fallback_weekly_range_note(context: dict[str, Any]) -> str:
     if not groups:
         return (
             "Tổng quan: Chưa đủ dữ liệu trong khoảng ngày đã chọn để tạo nhận xét.\n"
-            "Điểm sáng: Hãy nới rộng khoảng ngày hoặc kiểm tra lại dữ liệu ranking.\n"
-            "Điểm cần chú ý / Nhận định: Cần bổ sung thêm mốc dữ liệu trước khi đánh giá xu hướng."
+            "Các điểm sáng: Hãy nới rộng khoảng ngày hoặc kiểm tra lại dữ liệu ranking.\n"
+            "Các điểm cần chú ý: Cần bổ sung thêm mốc dữ liệu trước khi đánh giá xu hướng."
         )
 
     positive_groups = [item for item in groups if (item.get("rank_delta") or 0) > 0]
@@ -84,31 +94,37 @@ def fallback_weekly_range_note(context: dict[str, Any]) -> str:
         f"So với {baseline_text}, hiệu suất tổng thể hiện {'đang cải thiện' if (context.get('overall_delta') or 0) > 0 else 'cần theo dõi thêm'}."
     )
 
-    bright_lines = [
-        f"Điểm sáng: {strongest['name']} cải thiện {abs(strongest.get('rank_delta') or 0):.1f} bậc hạng trung bình và giữ điểm khỏe {strongest.get('health_score') or 0}/100."
-    ]
-    if highlight != strongest["name"]:
-        bright_lines.append(
-            f"Điểm sáng: {highlight} đang mở ra tín hiệu tăng mới, phù hợp để ưu tiên tối ưu thêm nội dung và liên kết nội bộ."
-        )
-    elif opportunities:
-        bright_lines.append(
-            f"Điểm sáng: {highlight} vẫn còn dư địa vì xu hướng đang tốt lên nhưng chưa vào vùng top mạnh."
-        )
-    bright_text = "\n".join(bright_lines[:2])
+    bright_lines = ["Các điểm sáng:"]
+    watch_lines = ["Các điểm cần chú ý:"]
+    for breakdown in context.get("group_breakdowns") or []:
+        bright_cluster_names = ", ".join(item["name"] for item in breakdown.get("bright_clusters") or []) or "chưa có cụm tăng đủ mạnh, nhưng vẫn giữ nhịp ổn định"
+        bright_line = f"{breakdown['group_name']}: sub-cluster sáng là {bright_cluster_names}."
+        if breakdown.get("best_keyword"):
+            bright_line += (
+                f" Trường hợp nổi bật: {breakdown['best_keyword']['keyword']} "
+                f"(thuộc {breakdown['best_keyword']['cluster_name']}) đi từ Top {int(breakdown['best_keyword']['previous_rank'])} "
+                f"lên Top {int(breakdown['best_keyword']['current_rank'])} trong giai đoạn "
+                f"{short_date_label(breakdown['best_keyword']['from_date'])} - {short_date_label(breakdown['best_keyword']['to_date'])}."
+            )
+        bright_lines.append(bright_line)
 
-    watch_lines = [
-        f"Điểm cần chú ý / Nhận định: {watch_name} đang giảm nhịp hoặc chưa bắt kịp tốc độ chung, nên theo dõi sát thêm trong kỳ tới."
-    ]
+        watch_cluster_names = ", ".join(item["name"] for item in breakdown.get("watch_clusters") or []) or "chưa có cụm giảm sâu, cần tiếp tục theo dõi"
+        watch_line = f"{breakdown['group_name']}: cần chú ý {watch_cluster_names}."
+        if breakdown.get("worst_keyword"):
+            watch_line += (
+                f" Trường hợp đặc biệt: {breakdown['worst_keyword']['keyword']} "
+                f"(thuộc {breakdown['worst_keyword']['cluster_name']}) đi từ Top {int(breakdown['worst_keyword']['previous_rank'])} "
+                f"xuống Top {int(breakdown['worst_keyword']['current_rank'])} trong giai đoạn "
+                f"{short_date_label(breakdown['worst_keyword']['from_date'])} - {short_date_label(breakdown['worst_keyword']['to_date'])}."
+            )
+        watch_lines.append(watch_line)
+
+    if highlight != strongest["name"]:
+        bright_lines.append(f"Cơ hội thêm: {highlight} vẫn còn dư địa để ưu tiên tối ưu tiếp.")
     if watch_name != weakest["name"]:
-        watch_lines.append(
-            f"Điểm cần chú ý / Nhận định: {weakest['name']} vẫn là nhóm kéo chậm hiệu suất tổng, nên ưu tiên kiểm tra kỹ thuật hoặc đối thủ."
-        )
-    elif risk_groups:
-        watch_lines.append(
-            f"Điểm cần chú ý / Nhận định: {weakest['name']} đang thấp hơn mức trung bình của dashboard, nên ưu tiên tối ưu để tránh kéo tụt toàn bộ nhóm."
-        )
-    return "\n".join([overview, bright_text, "\n".join(watch_lines[:2])])
+        watch_lines.append(f"Kết luận ngắn: {watch_name} nên được theo dõi sát hơn trong kỳ tới.")
+
+    return "\n".join([overview, *bright_lines, *watch_lines])
 
 
 def fallback_cluster_pattern(

@@ -128,9 +128,7 @@ export default function GroupTab({ data, filters, setFilters, mode, controlsMode
         <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
           <div>
             <p className="text-sm font-semibold text-white">Đổi góc nhìn sub-cluster</p>
-            <p className="mt-1 text-sm text-slate-400">
-              Engine tự suy ra 2-3 kịch bản gom cụm từ chính dataset này. Bạn chỉ đổi view, còn tập keyword và dữ liệu gốc vẫn giữ nguyên.
-            </p>
+            <p className="mt-1 text-sm text-slate-400">Đổi nhanh giữa các cách gom cụm phù hợp với dataset hiện tại.</p>
           </div>
           <div className="flex flex-wrap items-center gap-3">
             <button
@@ -150,14 +148,7 @@ export default function GroupTab({ data, filters, setFilters, mode, controlsMode
           {selectedScenario ? (
             <p className="mt-2 font-medium text-white">{selectedScenario.scenario_label}</p>
           ) : null}
-          <p className="mt-2">
-            {data.insight_note_global || "Engine đang phân tích phân bố tag để gom cụm phù hợp nhất cho bộ dữ liệu này."}
-          </p>
-          {selectedScenario?.scenario_description ? (
-            <p className="mt-2 text-xs uppercase tracking-[0.18em] text-slate-500">
-              {selectedScenario.scenario_description}
-            </p>
-          ) : null}
+          <p className="mt-2">{data.insight_note_global || selectedScenario?.scenario_description || "Đang dùng góc nhìn phù hợp nhất cho bộ dữ liệu này."}</p>
         </div>
       </div>
 

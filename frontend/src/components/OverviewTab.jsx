@@ -93,9 +93,9 @@ export default function OverviewTab({
       <div className={`rounded-[32px] border bg-gradient-to-br p-6 ${mode === "client" ? "border-neon-yellow/45 from-neon-yellow/18 to-neon-orange/8 shadow-warning" : "border-neon-yellow/30 from-neon-yellow/12 to-transparent shadow-warning"}`}>
         <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
           <div className="min-w-0 flex-1 lg:pr-4">
-            <p className="text-xs uppercase tracking-[0.3em] text-neon-yellow">⚡ Nhận xét hàng tuần</p>
+            <p className="text-xs uppercase tracking-[0.3em] text-neon-yellow">Nhận xét</p>
             {canEditRange ? (
-              <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-[200px,200px,1fr]">
+              <div className="mt-4 grid gap-3 md:grid-cols-2">
                 <label className="text-sm font-semibold text-white">
                   Từ ngày
                   <select
@@ -124,9 +124,6 @@ export default function OverviewTab({
                     ))}
                   </select>
                 </label>
-                <div className="rounded-[24px] border border-white/10 bg-black/10 px-4 py-3 text-sm leading-7 text-slate-300">
-                  Nhận xét sẽ tự đọc dữ liệu dashboard trong khoảng ngày đang chọn và so sánh với kỳ tương đương trước đó.
-                </div>
               </div>
             ) : null}
             <textarea

@@ -754,7 +754,7 @@ export default function App() {
                   ⚡ SEO RANKING DASHBOARD
                 </p>
                 <h1 className="mt-3 font-display text-3xl font-bold text-white lg:text-4xl">
-                  Theo dõi thứ hạng SEO theo thời gian thực
+                  Theo dõi thứ hạng SEO
                 </h1>
                 <p className="mt-3 max-w-4xl text-sm leading-7 text-slate-300">
                   {overview?.subtitle || "Chưa có dữ liệu. Kết nối Google Sheets hoặc tải file để dựng dashboard."}

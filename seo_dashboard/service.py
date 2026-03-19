@@ -1547,7 +1547,125 @@ class DashboardService:
             "groups": group_rows,
             "opportunities": opportunities[:3],
             "watchlist": watchlist[:3],
+            "group_breakdowns": self._build_weekly_group_breakdowns(
+                project_id,
+                [item["name"] for item in group_rows],
+                resolved_range["to_date"],
+                resolved_range["compare_to_date"] or resolved_range["to_date"],
+            ),
         }
+
+    def _build_weekly_group_breakdowns(
+        self,
+        project_id: int,
+        group_names: list[str],
+        current_date: str,
+        baseline_date: str,
+    ) -> list[dict[str, Any]]:
+        breakdowns: list[dict[str, Any]] = []
+        for group_name in group_names:
+            group_view = self._build_cluster_view(
+                project_id,
+                current_date=current_date,
+                baseline_date=baseline_date,
+                selected_group=group_name,
+                status_filter="all",
+                tag_filter="all",
+                sort_by="health_score",
+                active_scenario_id=None,
+            )
+            cluster_list = group_view.get("cluster_list") or []
+            bright_clusters = [
+                {
+                    "name": cluster["cluster_name"],
+                    "rank_delta": cluster["rank_delta"],
+                    "health_score": cluster["health_score"],
+                }
+                for cluster in cluster_list
+                if cluster["trend_status"] == "rising"
+            ][:2]
+            watch_clusters = [
+                {
+                    "name": cluster["cluster_name"],
+                    "rank_delta": cluster["rank_delta"],
+                    "health_score": cluster["health_score"],
+                }
+                for cluster in cluster_list
+                if cluster["trend_status"] == "declining"
+            ][:2]
+            if not watch_clusters:
+                watch_clusters = [
+                    {
+                        "name": cluster["cluster_name"],
+                        "rank_delta": cluster["rank_delta"],
+                        "health_score": cluster["health_score"],
+                    }
+                    for cluster in sorted(
+                        cluster_list,
+                        key=lambda item: (item.get("health_score") or 999, item.get("rank_delta") or 0),
+                    )[:2]
+                ]
+            all_keywords = [
+                {
+                    **keyword,
+                    "cluster_name": cluster["cluster_name"],
+                }
+                for cluster in cluster_list
+                for keyword in cluster.get("keywords", [])
+            ]
+            best_keyword = None
+            if all_keywords:
+                best_keyword = max(
+                    all_keywords,
+                    key=lambda item: (
+                        float(item.get("rank_delta") or 0),
+                        -(float(item.get("current_rank") or 999)),
+                    ),
+                )
+            worst_keyword = None
+            if all_keywords:
+                worst_keyword = min(
+                    all_keywords,
+                    key=lambda item: (
+                        float(item.get("rank_delta") or 0),
+                        float(item.get("current_rank") or 999),
+                    ),
+                )
+            breakdowns.append(
+                {
+                    "group_name": group_name,
+                    "scenario_label": group_view.get("scenarios", [{}])[0].get("scenario_label") if group_view.get("scenarios") else None,
+                    "bright_clusters": bright_clusters,
+                    "watch_clusters": watch_clusters,
+                    "best_keyword": (
+                        {
+                            "keyword": best_keyword["keyword"],
+                            "cluster_name": best_keyword["cluster_name"],
+                            "rank_delta": best_keyword["rank_delta"],
+                            "previous_rank": best_keyword["previous_rank"],
+                            "current_rank": best_keyword["current_rank"],
+                            "from_date": baseline_date,
+                            "to_date": current_date,
+                        }
+                        if best_keyword and (best_keyword.get("rank_delta") or 0) > 0
+                        else None
+                    ),
+                    "worst_keyword": (
+                        {
+                            "keyword": worst_keyword["keyword"],
+                            "cluster_name": worst_keyword["cluster_name"],
+                            "rank_delta": worst_keyword["rank_delta"],
+                            "previous_rank": worst_keyword["previous_rank"],
+                            "current_rank": worst_keyword["current_rank"],
+                            "from_date": baseline_date,
+                            "to_date": current_date,
+                        }
+                        if worst_keyword and (worst_keyword.get("rank_delta") or 0) < 0
+                        else None
+                    ),
+                }
+            )
+        return breakdowns
 
     def _weekly_note_payload(
         self,
@@ -1622,6 +1740,7 @@ class DashboardService:
                 "to_date": context["baseline_to_date"],
             },
             "groups": context["groups"][:6],
+            "group_breakdowns": context["group_breakdowns"],
             "opportunities": context["opportunities"],
             "watchlist": context["watchlist"],
             "seo_input": seo_input.strip() or None,
@@ -1630,10 +1749,22 @@ class DashboardService:
             "Bạn là SEO analyst đang đọc dữ liệu từ dashboard SEO.\n"
             f"Dữ liệu hiện tại: {data_payload}\n"
             "Hãy viết nhận xét bằng tiếng Việt, ngắn gọn, bám sát dữ liệu và chia đúng 3 phần:\n"
-            "Tổng quan: 1-2 câu, nêu nhóm nào đang kéo tăng hoặc chậm lại trong khoảng ngày đang chọn.\n"
-            "Điểm sáng: 1-3 câu, ưu tiên tín hiệu tích cực, cụm/nhóm đang tăng, cơ hội mới.\n"
-            "Điểm cần chú ý / Nhận định: 1-3 câu, nêu nhóm giảm, dưới trung bình hoặc cần theo dõi, và kết thúc bằng hành động ngắn.\n"
-            "Không viết chung chung. Phải nhắc tới tên nhóm/cụm có trong dữ liệu."
+            "Tổng quan:\n"
+            "- 1-2 câu tóm tắt toàn cảnh trong khoảng ngày đang chọn.\n"
+            "Các điểm sáng:\n"
+            "- Phải nhắc đủ từng cluster chính trong dữ liệu (ví dụ B2B, M2 Extensions, SEO).\n"
+            "- Với mỗi cluster chính, nêu rõ sub-cluster đang sáng nhất.\n"
+            "- Nếu nói tăng/phục hồi thì cố gắng ghi rõ từ top nào lên top nào, từ ngày nào đến ngày nào.\n"
+            "- Nếu có thể, thêm 1 trường hợp đặc biệt là keyword hiệu suất tốt.\n"
+            "Các điểm cần chú ý:\n"
+            "- Cũng phải nhắc đủ từng cluster chính.\n"
+            "- Với mỗi cluster chính, nêu sub-cluster cần theo dõi nhất.\n"
+            "- Nếu nói giảm thì cố gắng ghi rõ từ top nào xuống top nào, từ ngày nào đến ngày nào.\n"
+            "- Nếu có thể, thêm 1 trường hợp đặc biệt là keyword giảm mạnh / rất không tốt.\n"
+            "Yêu cầu:\n"
+            "- Không bỏ sót cluster nào.\n"
+            "- Không dùng markdown bullet ký hiệu; chỉ viết plain text thành từng đoạn rõ ràng.\n"
+            "- Không viết chung chung kiểu dữ liệu ổn. Phải bám tên cluster/sub-cluster thật trong dữ liệu."
         )
         api_key = self._project_api_key(project_id) if allow_ai else None
         content = call_claude(prompt, api_key) or fallback_weekly_range_note(context)
@@ -3069,7 +3200,11 @@ class DashboardService:
                         {
                             "event_date": current["rank_date"],
                             "title": "⚠️ Biến động mạnh",
-                            "description": f"{keyword['keyword']} giảm {int(delta)} bậc trong kỳ gần nhất.",
+                            "description": (
+                                f"{keyword['keyword']} giảm từ Top {int(previous['position'])} xuống Top {int(current['position'])} "
+                                f"trong giai đoạn {format_date_label(previous['rank_date'])} - {format_date_label(current['rank_date'])} "
+                                f"({int(delta)} bậc)."
+                            ),
                             "impact_type": "warning",
                         }
                     )
@@ -3078,7 +3213,10 @@ class DashboardService:
                         {
                             "event_date": current["rank_date"],
                             "title": "🎉 Vào top 3",
-                            "description": f"{keyword['keyword']} vừa vào top 3.",
+                            "description": (
+                                f"{keyword['keyword']} đi từ Top {int(previous['position'])} lên Top {int(current['position'])} "
+                                f"trong giai đoạn {format_date_label(previous['rank_date'])} - {format_date_label(current['rank_date'])}."
+                            ),
                             "impact_type": "positive",
                         }
                     )
@@ -3093,7 +3231,11 @@ class DashboardService:
                             {
                                 "event_date": current["rank_date"],
                                 "title": "↩️ Phục hồi",
-                                "description": f"{keyword['keyword']} đã hồi lại sau nhịp giảm mạnh.",
+                                "description": (
+                                    f"{keyword['keyword']} đã phục hồi từ Top {int(history[index - 1]['position'])} về Top {int(current['position'])} "
+                                    f"trong giai đoạn {format_date_label(history[index - 1]['rank_date'])} - {format_date_label(current['rank_date'])}, "
+                                    f"sau khi từng rơi khỏi Top {int(old['position'])}."
+                                ),
                                 "impact_type": "recovery",
                             }
                         )
@@ -3105,7 +3247,10 @@ class DashboardService:
                     {
                         "event_date": rank_date,
                         "title": "⚠️ Có thể Google update",
-                        "description": f"Hơn 50% keyword của {group_name} giảm cùng ngày.",
+                        "description": (
+                            f"Hơn 50% keyword của {group_name} giảm cùng ngày ở mốc {format_date_label(rank_date)}. "
+                            "Nên đối chiếu thêm thay đổi SERP và kỹ thuật."
+                        ),
                         "impact_type": "warning",
                     }
                 )
