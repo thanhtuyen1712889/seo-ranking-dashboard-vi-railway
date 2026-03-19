@@ -64,7 +64,10 @@ export default function GroupTab({ data, filters, setFilters, mode }) {
     if (!filters.main_cluster && data.selected_main_cluster) {
       setFilters((previous) => ({ ...previous, main_cluster: data.selected_main_cluster }));
     }
-  }, [data, filters.main_cluster, setFilters]);
+    if (!filters.clustering_mode && data.clustering_mode) {
+      setFilters((previous) => ({ ...previous, clustering_mode: data.clustering_mode }));
+    }
+  }, [data, filters.main_cluster, filters.clustering_mode, setFilters]);
 
   useEffect(() => {
     const defaultClusterId = data?.trend_panel?.selected_cluster_id || data?.cluster_list?.[0]?.cluster_id || "";
@@ -104,6 +107,34 @@ export default function GroupTab({ data, filters, setFilters, mode }) {
 
   return (
     <div className="space-y-6">
+      <div className="panel-grid">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+          <div>
+            <p className="text-sm font-semibold text-white">Chế độ phân cụm</p>
+            <p className="mt-1 text-sm text-slate-400">
+              Dùng cùng một tập keyword nhưng đổi góc nhìn theo nền tảng, loại sản phẩm hoặc intent.
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2 rounded-full border border-white/10 bg-white/[0.03] p-1">
+            {[
+              ["default", "Mặc định"],
+              ["platform", "Nền tảng"],
+              ["product_type", "Loại sản phẩm"],
+              ["intent", "Nhu cầu"],
+            ].map(([value, label]) => (
+              <button
+                key={value}
+                className={`rounded-full px-4 py-2 text-sm font-semibold transition ${filters.clustering_mode === value ? "bg-neon-cyan text-slate-950" : "text-slate-300"}`}
+                type="button"
+                onClick={() => setFilters({ ...filters, clustering_mode: value })}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
       <div className="panel-grid">
         <div className="grid gap-3 xl:grid-cols-6">
           <label className="text-sm font-semibold text-white">
@@ -240,12 +271,13 @@ export default function GroupTab({ data, filters, setFilters, mode }) {
 
                       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5 xl:text-right">
                         <div>
-                          <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Keyword</p>
+                          <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Số KW</p>
                           <p className="mt-2 text-2xl font-bold text-white">{cluster.keyword_count}</p>
                         </div>
                         <div>
                           <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Volume</p>
                           <p className="mt-2 text-lg font-semibold text-white">{cluster.total_volume.toLocaleString("en-US")}</p>
+                          <p className="mt-1 text-xs text-slate-500">TB {cluster.avg_volume}</p>
                         </div>
                         <div>
                           <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Hạng TB</p>
@@ -352,6 +384,7 @@ export default function GroupTab({ data, filters, setFilters, mode }) {
             </div>
             <div className="mt-4 flex flex-wrap gap-2">
               <span className="chip">Volume {selectedCluster.total_volume.toLocaleString("en-US")}</span>
+              <span className="chip">Vol TB {selectedCluster.avg_volume}</span>
               <span className="chip">Hạng TB {formatRank(selectedCluster.avg_rank_current)}</span>
               <span className="chip">Điểm khỏe {selectedCluster.health_score}</span>
               <span className={`chip ${trendTone[selectedCluster.trend_status]}`}>{trendArrow[selectedCluster.trend_status]} {trendLabel[selectedCluster.trend_status]}</span>

@@ -166,6 +166,7 @@ def group_view(
     main_cluster: str | None = Query(default=None),
     tag: str = Query(default="all"),
     sort_by: str = Query(default="health_score"),
+    clustering_mode: str = Query(default="default"),
     _: dict[str, Any] = Depends(require_auth),
 ) -> dict[str, Any]:
     return service.get_group_view(
@@ -176,6 +177,7 @@ def group_view(
         main_cluster=main_cluster,
         tag_filter=tag,
         sort_by=sort_by,
+        clustering_mode=clustering_mode,
     )
 
 

@@ -88,6 +88,7 @@ export default function App() {
     main_cluster: "",
     tag: "all",
     sort_by: "health_score",
+    clustering_mode: "default",
   });
   const [keywordFilters, setKeywordFilters] = useState({
     current_date: "",
@@ -141,7 +142,7 @@ export default function App() {
     getGroupView(token, selectedProjectId, groupFilters)
       .then(setGroupView)
       .catch((error) => setToast({ type: "error", message: error.message }));
-  }, [selectedProjectId, token, groupFilters.current_date, groupFilters.baseline_date, groupFilters.status, groupFilters.main_cluster, groupFilters.tag, groupFilters.sort_by]);
+  }, [selectedProjectId, token, groupFilters.current_date, groupFilters.baseline_date, groupFilters.status, groupFilters.main_cluster, groupFilters.tag, groupFilters.sort_by, groupFilters.clustering_mode]);
 
   useEffect(() => {
     if (!selectedProjectId || !token || !keywordFilters.current_date) return;
@@ -353,7 +354,6 @@ export default function App() {
     try {
       await updateSettings(token, selectedProjectId, form);
       await loadOverviewAndSettings(selectedProjectId);
-      setSettingsOpen(false);
       setToast({ type: "success", message: "Đã lưu cài đặt." });
     } catch (error) {
       setToast({ type: "error", message: error.message });

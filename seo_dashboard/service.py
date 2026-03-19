@@ -67,6 +67,7 @@ PRODUCT_CLUSTER_LABELS = {
     "plugin": "Plugin",
     "module": "Module",
     "extension": "Extension",
+    "suite": "Suite / package",
     "theme": "Theme",
     "store": "Store",
     "seo_extension": "SEO Extension",
@@ -80,11 +81,11 @@ PLATFORM_LABELS = {
 }
 
 USE_CASE_LABELS = {
-    "b2b": "B2B",
-    "integration": "Integration",
-    "checkout": "Checkout",
-    "subscription": "Subscription",
-    "login": "Login",
+    "b2b": "Generic B2B",
+    "integration": "Integration / connector",
+    "checkout": "Checkout & payment",
+    "subscription": "Subscription / recurring",
+    "login": "Login / account access",
 }
 
 CLUSTER_SORTS = {
@@ -92,6 +93,31 @@ CLUSTER_SORTS = {
     "trend_strength": ("rank_delta", True),
     "total_volume": ("total_volume", True),
     "avg_rank": ("avg_rank_current", False),
+}
+
+PRODUCT_TAG_PATTERNS = {
+    "seo_extension": [r"\bseo\b"],
+    "plugin": [r"\bplugins?\b"],
+    "module": [r"\bmodules?\b"],
+    "extension": [r"\bextensions?\b", r"\baddons?\b", r"\badd[- ]ons?\b"],
+    "suite": [r"\bsuites?\b", r"\bpackages?\b", r"\bbundle\b"],
+    "theme": [r"\bthemes?\b"],
+    "store": [r"\bstores?\b", r"\bstorefront\b", r"\bstore front\b"],
+}
+
+PLATFORM_TAG_PATTERNS = {
+    "magento_2": [r"\bmagento 2\b", r"\bfor magento 2\b"],
+    "magento_1_or_generic": [r"\bmagento\b"],
+    "shopify": [r"\bshopify\b"],
+    "woocommerce": [r"\bwoocommerce\b"],
+}
+
+INTENT_TAG_PATTERNS = {
+    "b2b": [r"\bb2b\b"],
+    "integration": [r"\bintegration\b", r"\bconnector\b"],
+    "checkout": [r"\bcheckout\b", r"\bpayment\b"],
+    "subscription": [r"\bsubscription\b", r"\brecurring\b"],
+    "login": [r"\blogin\b", r"\bcustomer login\b", r"\baccount access\b"],
 }
 
 
@@ -241,18 +267,37 @@ class DashboardService:
         if getattr(parsed, "selected_sheet_name", None):
             display_source_name = f"{source_name} · {parsed.selected_sheet_name}"
         with transaction() as connection:
+            existing_clusters = {
+                (row["group_name"], row["name"]): dict(row)
+                for row in connection.execute(
+                    "SELECT * FROM clusters WHERE project_id = ?",
+                    (project_id,),
+                ).fetchall()
+            }
             existing_keywords = {
                 row["keyword"]: dict(row)
                 for row in connection.execute(
-                    "SELECT id, keyword FROM keywords WHERE project_id = ?",
+                    """
+                    SELECT id, keyword, group_name, cluster_name, kpi_target
+                    FROM keywords
+                    WHERE project_id = ?
+                    """,
                     (project_id,),
                 ).fetchall()
             }
             current_time = now_iso()
             for row in parsed.rows:
+                cluster_override = existing_clusters.get((row.group_name, row.cluster_name))
+                resolved_kpi_target = (
+                    int(cluster_override["kpi_target"])
+                    if cluster_override and cluster_override.get("kpi_target") is not None
+                    else int(row.kpi_target or 10)
+                )
                 keyword_record = existing_keywords.get(row.keyword)
                 if keyword_record:
                     keyword_id = keyword_record["id"]
+                    if keyword_record.get("kpi_target") is not None:
+                        resolved_kpi_target = int(keyword_record["kpi_target"])
                     connection.execute(
                         """
                         UPDATE keywords
@@ -269,7 +314,7 @@ class DashboardService:
                             row.found_url,
                             row.search_volume,
                             row.best_rank,
-                            row.kpi_target,
+                            resolved_kpi_target,
                             current_time,
                             keyword_id,
                         ),
@@ -294,13 +339,17 @@ class DashboardService:
                             row.found_url,
                             row.search_volume,
                             row.best_rank,
-                            row.kpi_target,
+                            resolved_kpi_target,
                             current_time,
                             current_time,
                         ),
                     )
                     keyword_id = int(cursor.lastrowid)
-                    existing_keywords[row.keyword] = {"id": keyword_id, "keyword": row.keyword}
+                    existing_keywords[row.keyword] = {
+                        "id": keyword_id,
+                        "keyword": row.keyword,
+                        "kpi_target": resolved_kpi_target,
+                    }
 
                 for rank_date, position in row.rankings.items():
                     connection.execute(
@@ -403,8 +452,12 @@ class DashboardService:
                 (project_id, group_name, cluster_name),
             ).fetchall()
             target_counter = Counter(value["kpi_target"] or 10 for value in keyword_targets)
-            kpi_target = int(target_counter.most_common(1)[0][0]) if target_counter else parsed.kpi_map.get(group_name, 10)
             previous_cluster = existing_targets.get((group_name, cluster_name))
+            kpi_target = (
+                int(previous_cluster["kpi_target"])
+                if previous_cluster and previous_cluster.get("kpi_target") is not None
+                else int(target_counter.most_common(1)[0][0]) if target_counter else parsed.kpi_map.get(group_name, 10)
+            )
             target_keywords = (
                 parsed.target_keyword_map.get(group_name)
                 or (previous_cluster or {}).get("target_keywords")
@@ -681,42 +734,44 @@ class DashboardService:
             entry["status"] = "đạt" if entry["achieved"] == entry["keyword_count"] else "chưa đạt"
         return metrics
 
+    def _match_tag_patterns(self, combined: str, mapping: dict[str, list[str]]) -> list[str]:
+        matched: list[str] = []
+        for tag, patterns in mapping.items():
+            if any(re.search(pattern, combined) for pattern in patterns):
+                matched.append(tag)
+        return matched
+
+    def _match_preferred_tags(self, primary_text: str, fallback_text: str, mapping: dict[str, list[str]]) -> list[str]:
+        matched = self._match_tag_patterns(primary_text, mapping)
+        if matched:
+            return matched
+        return self._match_tag_patterns(fallback_text, mapping)
+
     def _keyword_subcluster_tags(self, keyword: dict[str, Any]) -> list[str]:
         group_name = keyword.get("group_name") or "general"
         cluster_name = keyword.get("cluster_name") or ""
-        combined = normalize_label(" ".join([keyword.get("keyword") or "", group_name, cluster_name]))
+        keyword_text = normalize_label(keyword.get("keyword") or "")
+        context_text = normalize_label(" ".join([group_name, cluster_name]))
         tags: list[str] = []
 
-        if re.search(r"\bseo\b", combined):
-            tags.append("seo_extension")
-        for token in ("plugin", "module", "extension", "theme", "store"):
-            if re.search(rf"\b{token}\b", combined):
-                tags.append(token)
-
-        if "magento 2" in combined or "for magento 2" in combined:
-            tags.append("magento_2")
-        elif "magento" in combined:
-            tags.append("magento_1_or_generic")
-        if "shopify" in combined:
-            tags.append("shopify")
-        if "woocommerce" in combined:
-            tags.append("woocommerce")
-
-        for token in ("b2b", "integration", "checkout", "login"):
-            if re.search(rf"\b{token}\b", combined):
-                tags.append(token)
-        if "subscription" in combined or "recurring" in combined:
-            tags.append("subscription")
+        # Prefer signals from the keyword itself so "module/plugin" is not swallowed
+        # by a broader group label such as "M2 Extensions".
+        tags.extend(self._match_preferred_tags(keyword_text, context_text, PRODUCT_TAG_PATTERNS))
+        platform_tags = self._match_preferred_tags(keyword_text, context_text, PLATFORM_TAG_PATTERNS)
+        if "magento_2" in platform_tags and "magento_1_or_generic" in platform_tags:
+            platform_tags = [tag for tag in platform_tags if tag != "magento_1_or_generic"]
+        tags.extend(platform_tags)
+        tags.extend(self._match_preferred_tags(keyword_text, context_text, INTENT_TAG_PATTERNS))
 
         normalized_group = normalize_label(group_name).replace(" ", "_")
         if normalized_group:
             tags.append(normalized_group)
         return sorted(set(tags))
 
-    def _subcluster_descriptor(self, keyword: dict[str, Any]) -> tuple[str, str, list[str]]:
+    def _subcluster_descriptor(self, keyword: dict[str, Any], clustering_mode: str) -> tuple[str, str, list[str]]:
         tags = self._keyword_subcluster_tags(keyword)
         product_tag = next(
-            (tag for tag in ("seo_extension", "extension", "module", "plugin", "theme", "store") if tag in tags),
+            (tag for tag in ("seo_extension", "suite", "extension", "module", "plugin", "theme", "store") if tag in tags),
             None,
         )
         platform_tag = next(
@@ -730,7 +785,28 @@ class DashboardService:
 
         cluster_id_parts: list[str] = []
         cluster_label = ""
-        if product_tag:
+        if clustering_mode == "platform":
+            primary_platform = platform_tag or "other_platform"
+            cluster_id_parts.extend(["platform", primary_platform])
+            if platform_tag:
+                cluster_label = f"{PLATFORM_LABELS[platform_tag]} (mọi loại)"
+            else:
+                cluster_label = "Khác (mọi loại)"
+        elif clustering_mode == "product_type":
+            primary_product = product_tag or "other_type"
+            cluster_id_parts.extend(["product_type", primary_product])
+            if product_tag:
+                cluster_label = f"{PRODUCT_CLUSTER_LABELS[product_tag]} (mọi nền tảng)"
+            else:
+                cluster_label = "Khác (mọi nền tảng)"
+        elif clustering_mode == "intent":
+            primary_intent = use_case_tag or ("b2b" if "b2b" in tags else "generic_intent")
+            cluster_id_parts.extend(["intent", primary_intent])
+            if primary_intent in USE_CASE_LABELS:
+                cluster_label = USE_CASE_LABELS[primary_intent]
+            else:
+                cluster_label = "Nhu cầu chung"
+        elif product_tag:
             cluster_id_parts.append(product_tag)
             cluster_label = PRODUCT_CLUSTER_LABELS[product_tag]
             if platform_tag:
@@ -758,6 +834,7 @@ class DashboardService:
         keyword: dict[str, Any],
         current_date: str,
         baseline_date: str | None,
+        clustering_mode: str,
     ) -> dict[str, Any] | None:
         current_rank = self._history_position(keyword["history"], current_date)
         if current_rank is None:
@@ -770,7 +847,7 @@ class DashboardService:
                 trend_status = "rising"
             elif rank_delta <= -2:
                 trend_status = "declining"
-        cluster_id, cluster_name, tags = self._subcluster_descriptor(keyword)
+        cluster_id, cluster_name, tags = self._subcluster_descriptor(keyword, clustering_mode)
         return {
             "keyword_id": keyword["id"],
             "keyword": keyword["keyword"],
@@ -844,6 +921,7 @@ class DashboardService:
         status_filter: str,
         tag_filter: str,
         sort_by: str,
+        clustering_mode: str,
     ) -> dict[str, Any]:
         keywords = self._load_keywords_with_history(project_id)
         groups = sorted({(keyword.get("group_name") or "Chưa phân nhóm") for keyword in keywords})
@@ -852,7 +930,7 @@ class DashboardService:
         for keyword in keywords:
             if selected_group and (keyword.get("group_name") or "Chưa phân nhóm") != selected_group:
                 continue
-            row = self._cluster_keyword_row(keyword, current_date, baseline_date)
+            row = self._cluster_keyword_row(keyword, current_date, baseline_date, clustering_mode)
             if row is None:
                 continue
             relevant_rows.append(row)
@@ -1029,6 +1107,7 @@ class DashboardService:
         }
         total_volume = sum(item["volume"] for item in relevant_rows)
         return {
+            "clustering_mode": clustering_mode,
             "dates": dates,
             "current_date": current_date,
             "baseline_date": baseline_date,
@@ -1189,10 +1268,12 @@ class DashboardService:
         main_cluster: str | None = None,
         tag_filter: str = "all",
         sort_by: str = "health_score",
+        clustering_mode: str = "default",
     ) -> dict[str, Any]:
         dates = self.get_project_dates(project_id)
         if not dates:
             return {
+                "clustering_mode": clustering_mode,
                 "dates": [],
                 "current_date": None,
                 "baseline_date": None,
@@ -1214,6 +1295,7 @@ class DashboardService:
             status_filter=status_filter,
             tag_filter=tag_filter,
             sort_by=sort_by,
+            clustering_mode=clustering_mode,
         )
 
     def get_keyword_table(self, project_id: int, filters: dict[str, Any]) -> dict[str, Any]:

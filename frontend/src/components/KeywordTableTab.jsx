@@ -14,6 +14,36 @@ export default function KeywordTableTab({
   }
 
   const currentDate = data.current_date || data.dates[data.dates.length - 1];
+  const orderedDates = [...data.dates].reverse();
+  const stickyColumns =
+    mode === "team"
+      ? [
+          { left: 0, width: 72 },
+          { left: 72, width: 124 },
+          { left: 196, width: 260 },
+          { left: 456, width: 88 },
+          { left: 544, width: 96 },
+          { left: 640, width: 96 },
+        ]
+      : [
+          { left: 0, width: 72 },
+          { left: 72, width: 124 },
+          { left: 196, width: 260 },
+          { left: 456, width: 96 },
+        ];
+
+  function stickyProps(index, isHeader = false) {
+    const config = stickyColumns[index];
+    if (!config) return {};
+    return {
+      style: {
+        left: `${config.left}px`,
+        minWidth: `${config.width}px`,
+        width: `${config.width}px`,
+      },
+      className: `sticky ${isHeader ? "z-20 bg-[#0f1723]" : "z-10 bg-[#111723]"} ${index === stickyColumns.length - 1 ? "shadow-[10px_0_24px_rgba(3,7,18,0.55)]" : ""}`,
+    };
+  }
 
   return (
     <div className="space-y-6">
@@ -78,21 +108,21 @@ export default function KeywordTableTab({
 
       <div className="panel-grid overflow-hidden p-0">
         <div className="flex flex-wrap items-center gap-3 border-b border-white/10 px-5 py-4 text-sm text-slate-400">
-          <span className="chip border-neon-cyan/30 bg-neon-cyan/10 text-neon-cyan">Ngày hiện tại: {formatDateLabel(currentDate)}</span>
-          <span className="chip">Ngày quá khứ: các cột nằm bên trái</span>
-          <span>Cột <span className="font-semibold text-white">Thay đổi</span> đã được kéo sát trước dải ngày để đọc nhanh hơn.</span>
+          <span className="chip border-neon-cyan/30 bg-neon-cyan/10 text-neon-cyan">Ngày hiện tại nằm bên trái: {formatDateLabel(currentDate)}</span>
+          <span className="chip">Ngày quá khứ kéo dần về bên phải</span>
+          <span>6 cột đầu đã được cố định đến <span className="font-semibold text-white">Thay đổi</span> để kéo ngang vẫn bám được dữ liệu.</span>
         </div>
         <div className="overflow-x-auto">
           <table className="min-w-full border-separate border-spacing-0 text-sm">
             <thead className="sticky top-0 z-10 bg-[#0f1723]">
               <tr>
-                <th className="border-b border-white/10 px-4 py-3 text-left font-semibold text-slate-400">#</th>
-                <th className="border-b border-white/10 px-4 py-3 text-left font-semibold text-slate-400">Bộ</th>
-                <th className="border-b border-white/10 px-4 py-3 text-left font-semibold text-slate-400">Keyword</th>
-                {mode === "team" ? <th className="border-b border-white/10 px-4 py-3 text-left font-semibold text-slate-400">Vol</th> : null}
-                {mode === "team" ? <th className="border-b border-white/10 px-4 py-3 text-left font-semibold text-slate-400">Best Rank</th> : null}
-                <th className="border-b border-white/10 px-4 py-3 text-left font-semibold text-slate-400">Thay Đổi</th>
-                {data.dates.map((date) => (
+                <th {...stickyProps(0, true)} className={`${stickyProps(0, true).className} border-b border-white/10 px-4 py-3 text-left font-semibold text-slate-400`}>#</th>
+                <th {...stickyProps(1, true)} className={`${stickyProps(1, true).className} border-b border-white/10 px-4 py-3 text-left font-semibold text-slate-400`}>Bộ</th>
+                <th {...stickyProps(2, true)} className={`${stickyProps(2, true).className} border-b border-white/10 px-4 py-3 text-left font-semibold text-slate-400`}>Keyword</th>
+                {mode === "team" ? <th {...stickyProps(3, true)} className={`${stickyProps(3, true).className} border-b border-white/10 px-4 py-3 text-left font-semibold text-slate-400`}>Vol</th> : null}
+                {mode === "team" ? <th {...stickyProps(4, true)} className={`${stickyProps(4, true).className} border-b border-white/10 px-4 py-3 text-left font-semibold text-slate-400`}>Best Rank</th> : null}
+                <th {...stickyProps(mode === "team" ? 5 : 3, true)} className={`${stickyProps(mode === "team" ? 5 : 3, true).className} border-b border-white/10 px-4 py-3 text-left font-semibold text-slate-400`}>Thay Đổi</th>
+                {orderedDates.map((date) => (
                   <th
                     key={date}
                     className={`border-b px-3 py-3 text-center font-semibold ${date === currentDate ? "border-neon-cyan/35 bg-neon-cyan/6 text-neon-cyan" : "border-white/10 text-slate-400"}`}
@@ -106,18 +136,18 @@ export default function KeywordTableTab({
             <tbody>
               {data.rows.map((row) => (
                 <tr key={row.id} className="cursor-pointer transition hover:bg-white/[0.03]" onClick={() => onOpenKeyword(row.id)}>
-                  <td className="border-b border-white/5 px-4 py-4 text-slate-400">{row.index}</td>
-                  <td className="border-b border-white/5 px-4 py-4 text-slate-300">{row.group_name}</td>
-                  <td className="border-b border-white/5 px-4 py-4">
+                  <td {...stickyProps(0)} className={`${stickyProps(0).className} border-b border-white/5 px-4 py-4 text-slate-400`}>{row.index}</td>
+                  <td {...stickyProps(1)} className={`${stickyProps(1).className} border-b border-white/5 px-4 py-4 text-slate-300`}>{row.group_name}</td>
+                  <td {...stickyProps(2)} className={`${stickyProps(2).className} border-b border-white/5 px-4 py-4`}>
                     <div>
                       <p className="font-semibold text-white">{row.keyword}</p>
                       <p className="mt-1 text-xs text-slate-500">{row.cluster_name}</p>
                     </div>
                   </td>
-                  {mode === "team" ? <td className="border-b border-white/5 px-4 py-4 text-slate-300">{row.search_volume || "—"}</td> : null}
-                  {mode === "team" ? <td className="border-b border-white/5 px-4 py-4 text-slate-300">{formatRank(row.best_rank)}</td> : null}
-                  <td className={`border-b border-white/5 px-4 py-4 font-bold ${deltaTone(row.delta_prev)}`}>{formatDelta(row.delta_prev)}</td>
-                  {data.dates.map((date) => {
+                  {mode === "team" ? <td {...stickyProps(3)} className={`${stickyProps(3).className} border-b border-white/5 px-4 py-4 text-slate-300`}>{row.search_volume || "—"}</td> : null}
+                  {mode === "team" ? <td {...stickyProps(4)} className={`${stickyProps(4).className} border-b border-white/5 px-4 py-4 text-slate-300`}>{formatRank(row.best_rank)}</td> : null}
+                  <td {...stickyProps(mode === "team" ? 5 : 3)} className={`${stickyProps(mode === "team" ? 5 : 3).className} border-b border-white/5 px-4 py-4 font-bold ${deltaTone(row.delta_prev)}`}>{formatDelta(row.delta_prev)}</td>
+                  {orderedDates.map((date) => {
                     const rank = row.positions[date];
                     return (
                       <td key={`${row.id}-${date}`} className={`border-b border-white/5 px-2 py-4 text-center ${date === currentDate ? "bg-neon-cyan/4" : ""}`}>
