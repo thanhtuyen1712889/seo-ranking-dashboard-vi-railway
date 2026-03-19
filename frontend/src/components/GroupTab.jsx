@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import {
   CartesianGrid,
   Line,
@@ -58,8 +58,6 @@ export default function GroupTab({ data, filters, setFilters, mode, controlsMode
   const [selectedClusterId, setSelectedClusterId] = useState("");
   const [expandedClusterId, setExpandedClusterId] = useState("");
   const [expandedSize, setExpandedSize] = useState({});
-  const [scenarioMenuOpen, setScenarioMenuOpen] = useState(false);
-  const scenarioMenuRef = useRef(null);
 
   useEffect(() => {
     if (!data) return;
@@ -82,17 +80,6 @@ export default function GroupTab({ data, filters, setFilters, mode, controlsMode
     setExpandedClusterId((previous) => (data?.cluster_list?.some((item) => item.cluster_id === previous) ? previous : defaultClusterId));
   }, [data]);
 
-  useEffect(() => {
-    if (!scenarioMenuOpen) return undefined;
-    function handlePointerDown(event) {
-      if (!scenarioMenuRef.current?.contains(event.target)) {
-        setScenarioMenuOpen(false);
-      }
-    }
-    window.addEventListener("pointerdown", handlePointerDown);
-    return () => window.removeEventListener("pointerdown", handlePointerDown);
-  }, [scenarioMenuOpen]);
-
   if (!data?.cluster_list?.length) {
     return (
       <div className="panel-grid text-center">
@@ -111,6 +98,10 @@ export default function GroupTab({ data, filters, setFilters, mode, controlsMode
     data.scenarios?.find((item) => item.scenario_id === data.active_scenario_id) ||
     data.scenarios?.[0] ||
     null;
+  const selectedScenarioIndex = Math.max(
+    0,
+    (data.scenarios || []).findIndex((item) => item.scenario_id === selectedScenario?.scenario_id),
+  );
   const selectedDrilldown =
     data.drilldown_tables.find((item) => item.cluster_id === selectedCluster?.cluster_id) || null;
   const visibleKeywords = selectedDrilldown
@@ -120,6 +111,15 @@ export default function GroupTab({ data, filters, setFilters, mode, controlsMode
   function handleSelectCluster(clusterId) {
     setSelectedClusterId(clusterId);
     setExpandedClusterId((previous) => (previous === clusterId ? "" : clusterId));
+  }
+
+  function handleRotateScenario() {
+    if (!data?.scenarios?.length || data.scenarios.length <= 1) return;
+    const nextIndex = (selectedScenarioIndex + 1) % data.scenarios.length;
+    setFilters({
+      ...filters,
+      active_scenario_id: data.scenarios[nextIndex].scenario_id,
+    });
   }
 
   return (
@@ -132,44 +132,17 @@ export default function GroupTab({ data, filters, setFilters, mode, controlsMode
               Engine tự suy ra 2-3 kịch bản gom cụm từ chính dataset này. Bạn chỉ đổi view, còn tập keyword và dữ liệu gốc vẫn giữ nguyên.
             </p>
           </div>
-          <div ref={scenarioMenuRef} className="relative">
+          <div className="flex flex-wrap items-center gap-3">
             <button
-              className="button-secondary min-w-[260px] justify-between gap-3"
+              className="button-secondary"
               type="button"
-              onClick={() => setScenarioMenuOpen((previous) => !previous)}
+              onClick={handleRotateScenario}
+              disabled={!data?.scenarios?.length || data.scenarios.length <= 1}
             >
-              <span>Đổi góc nhìn sub-cluster</span>
-              <span className="truncate text-slate-300">
-                {selectedScenario?.scenario_label || "Chọn góc nhìn"}
-              </span>
+              {data?.scenarios?.length > 1
+                ? `Đổi góc nhìn sub-cluster (${selectedScenarioIndex + 1}/${data.scenarios.length})`
+                : "Đổi góc nhìn sub-cluster"}
             </button>
-
-            {scenarioMenuOpen ? (
-              <div className="absolute right-0 top-[calc(100%+12px)] z-20 w-[320px] rounded-[24px] border border-white/10 bg-[#0f1722] p-2 shadow-glow">
-                {(data.scenarios || []).map((scenario) => {
-                  const isActive = filters.active_scenario_id === scenario.scenario_id;
-                  return (
-                    <button
-                      key={scenario.scenario_id}
-                      className={`w-full rounded-[18px] px-4 py-3 text-left transition ${isActive ? "bg-neon-cyan/15 text-white" : "text-slate-300 hover:bg-white/[0.04]"}`}
-                      type="button"
-                      onClick={() => {
-                        setFilters({ ...filters, active_scenario_id: scenario.scenario_id });
-                        setScenarioMenuOpen(false);
-                      }}
-                    >
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="min-w-0">
-                          <p className="font-semibold">{scenario.scenario_label}</p>
-                          <p className="mt-1 text-xs leading-6 text-slate-400">{scenario.scenario_description}</p>
-                        </div>
-                        {isActive ? <span className="chip border-neon-cyan/30 bg-neon-cyan/10 text-neon-cyan">Đang xem</span> : null}
-                      </div>
-                    </button>
-                  );
-                })}
-              </div>
-            ) : null}
           </div>
         </div>
         <div className="mt-4 rounded-[24px] border border-neon-cyan/18 bg-neon-cyan/6 px-4 py-4 text-sm leading-7 text-slate-300">

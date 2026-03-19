@@ -17,7 +17,15 @@ from rapidfuzz import fuzz, process
 GROUP_ALIASES = ["group", "bo", "bộ", "nhom", "nhóm"]
 CLUSTER_ALIASES = ["cluster", "cum", "cụm", "topic", "category"]
 KEYWORD_ALIASES = ["keyword", "tu khoa", "từ khóa", "kw"]
-VOLUME_ALIASES = ["vol", "volume", "search volume", "searchvol"]
+VOLUME_ALIASES = [
+    "vol",
+    "volume",
+    "voulume",
+    "keyword volume",
+    "search volume",
+    "search voulume",
+    "searchvol",
+]
 AVG_ALIASES = ["avg", "average", "avg ranking", "average ranking"]
 BEST_ALIASES = ["best rank", "best ranking", "best"]
 KPI_ALIASES = ["kpi", "target", "kpi target"]

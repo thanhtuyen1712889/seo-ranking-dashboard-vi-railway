@@ -22,6 +22,10 @@ const PALETTE = ["#38bdf8", "#2dd4bf", "#7ee787", "#f59e0b", "#fb7185", "#f97316
 export default function OverviewTab({
   overview,
   mode,
+  weeklyNote,
+  weeklyNoteRange,
+  setWeeklyNoteRange,
+  weeklyNoteLoading,
   generatingInsight,
   onGenerateInsight,
   onSaveWeeklyNote,
@@ -34,13 +38,15 @@ export default function OverviewTab({
 }) {
   const [editingNote, setEditingNote] = useState(false);
   const [weeklyDraft, setWeeklyDraft] = useState("");
+  const activeNote = weeklyNote || overview?.latest_insight || null;
+  const dates = overview?.dates || [];
 
   useEffect(() => {
-    setWeeklyDraft(overview?.latest_insight?.content_vi || "");
+    setWeeklyDraft(activeNote?.content_vi || "");
     setEditingNote(false);
-  }, [overview?.latest_insight?.generated_at, overview?.latest_insight?.content_vi]);
+  }, [activeNote?.generated_at, activeNote?.content_vi, activeNote?.saved_at]);
 
-  if (!overview?.dates?.length) {
+  if (!dates.length) {
     return (
       <div className="panel-grid text-center">
         <p className="text-lg font-semibold text-white">Chưa có dữ liệu ranking</p>
@@ -58,6 +64,9 @@ export default function OverviewTab({
     ...item.groups,
   }));
   const avgTrendData = overview.avg_trend || [];
+  const draftChanged = weeklyDraft.trim() !== (activeNote?.content_vi || "").trim();
+  const canEditRange = !readOnly && typeof setWeeklyNoteRange === "function";
+  const noteTimestamp = activeNote?.saved_at || activeNote?.generated_at || null;
 
   return (
     <div className="space-y-6">
@@ -85,17 +94,54 @@ export default function OverviewTab({
         <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
           <div className="min-w-0 flex-1 lg:pr-4">
             <p className="text-xs uppercase tracking-[0.3em] text-neon-yellow">⚡ Nhận xét hàng tuần</p>
+            {canEditRange ? (
+              <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-[200px,200px,1fr]">
+                <label className="text-sm font-semibold text-white">
+                  Từ ngày
+                  <select
+                    className="input-dark mt-2"
+                    value={weeklyNoteRange?.from_date || ""}
+                    onChange={(event) => setWeeklyNoteRange((previous) => ({ ...previous, from_date: event.target.value }))}
+                  >
+                    {dates.map((date) => (
+                      <option key={`from-${date}`} value={date}>
+                        {formatDateLabel(date)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="text-sm font-semibold text-white">
+                  Đến ngày
+                  <select
+                    className="input-dark mt-2"
+                    value={weeklyNoteRange?.to_date || ""}
+                    onChange={(event) => setWeeklyNoteRange((previous) => ({ ...previous, to_date: event.target.value }))}
+                  >
+                    {dates.map((date) => (
+                      <option key={`to-${date}`} value={date}>
+                        {formatDateLabel(date)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <div className="rounded-[24px] border border-white/10 bg-black/10 px-4 py-3 text-sm leading-7 text-slate-300">
+                  Nhận xét sẽ tự đọc dữ liệu dashboard trong khoảng ngày đang chọn và so sánh với kỳ tương đương trước đó.
+                </div>
+              </div>
+            ) : null}
             <textarea
               className={`mt-3 min-h-[220px] w-full resize-y rounded-[24px] border border-white/10 bg-black/20 px-5 py-4 text-slate-100 outline-none transition ${mode === "client" ? "text-lg leading-8 lg:min-h-[260px]" : "text-base leading-8 lg:min-h-[240px]"} ${editingNote ? "ring-2 ring-neon-yellow/30" : ""}`}
               value={weeklyDraft}
               readOnly={!editingNote}
               onChange={(event) => setWeeklyDraft(event.target.value)}
-              placeholder="Chưa có nhận xét cho mốc dữ liệu hiện tại."
+              placeholder={weeklyNoteLoading ? "Đang đọc dữ liệu dashboard để tạo nhận xét..." : "Chưa có nhận xét cho khoảng ngày hiện tại."}
             />
             <p className="mt-3 text-xs text-slate-400">
-              {overview.latest_insight?.generated_at
-                ? `Cập nhật ghi chú: ${formatDateTime(overview.latest_insight.generated_at)}`
-                : "Bạn có thể tự tạo nhận xét mới hoặc nhập ghi chú tay cho tuần này."}
+              {weeklyNoteLoading
+                ? "Đang cập nhật nhận xét theo dữ liệu mới nhất..."
+                : noteTimestamp
+                  ? `Cập nhật ghi chú lúc: ${formatDateTime(noteTimestamp)}`
+                  : "Nếu chưa có ghi chú đã ghim cho khoảng này, hệ thống sẽ tự tạo một nhận xét mới từ dữ liệu live."}
             </p>
           </div>
           {!readOnly ? (
@@ -105,13 +151,22 @@ export default function OverviewTab({
               </button>
               {editingNote ? (
                 <>
-                  <button className="button-primary" type="button" onClick={() => onSaveWeeklyNote(weeklyDraft)} disabled={savingWeeklyNote || !weeklyDraft.trim()}>
-                    {savingWeeklyNote ? "Đang lưu..." : "Lưu nhận xét"}
+                  <button
+                    className="button-primary"
+                    type="button"
+                    onClick={() => onSaveWeeklyNote(weeklyDraft, draftChanged ? "User" : (activeNote?.author || "AI"))}
+                    disabled={savingWeeklyNote || !weeklyDraft.trim()}
+                  >
+                    {savingWeeklyNote ? "Đang lưu..." : "Lưu & ghim"}
                   </button>
-                  <button className="button-secondary" type="button" onClick={() => {
-                    setWeeklyDraft(overview.latest_insight?.content_vi || "");
-                    setEditingNote(false);
-                  }}>
+                  <button
+                    className="button-secondary"
+                    type="button"
+                    onClick={() => {
+                      setWeeklyDraft(activeNote?.content_vi || "");
+                      setEditingNote(false);
+                    }}
+                  >
                     Hủy sửa
                   </button>
                 </>

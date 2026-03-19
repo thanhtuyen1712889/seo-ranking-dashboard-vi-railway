@@ -101,10 +101,14 @@ export default function PublicShareView({ shareToken, shareType }) {
           return;
         }
         setPayload(response);
+        const allowedTabs = (response.available_tabs || ["overview", "groups"]).filter(
+          (tabId) => (response.view_mode || "client") === "team" || tabId !== "keywords",
+        );
         setActiveTab((previous) => {
-          const fallback = response.view_state?.active_tab || response.available_tabs?.[0] || "overview";
+          const requestedTab = response.view_state?.active_tab || allowedTabs[0] || "overview";
+          const fallback = allowedTabs.includes(requestedTab) ? requestedTab : (allowedTabs[0] || "overview");
           const nextValue = previous || fallback;
-          return response.available_tabs?.includes(nextValue) ? nextValue : fallback;
+          return allowedTabs.includes(nextValue) ? nextValue : fallback;
         });
         setGroupFilters((previous) => previous || {
           current_date: response.group_view?.current_date || response.view_state?.group_filters?.current_date || "",
@@ -196,6 +200,17 @@ export default function PublicShareView({ shareToken, shareType }) {
     }
   }
 
+  const mode = payload?.view_mode || "client";
+  const visibleTabs = (payload?.available_tabs || ["overview", "groups"]).filter(
+    (tabId) => mode === "team" || tabId !== "keywords",
+  );
+
+  useEffect(() => {
+    if (mode !== "team" && activeTab === "keywords") {
+      setActiveTab("overview");
+    }
+  }, [mode, activeTab]);
+
   if (loading && !payload) {
     return <div className="flex min-h-screen items-center justify-center text-sm text-slate-400">Đang tải link chia sẻ...</div>;
   }
@@ -234,9 +249,6 @@ export default function PublicShareView({ shareToken, shareType }) {
       </div>
     );
   }
-
-  const visibleTabs = payload.available_tabs || ["overview", "groups"];
-  const mode = payload.view_mode || "client";
 
   return (
     <div className="min-h-screen px-4 py-4 lg:px-6">
@@ -352,7 +364,7 @@ export default function PublicShareView({ shareToken, shareType }) {
           />
         ) : null}
 
-        {activeTab === "keywords" && payload.keyword_table ? (
+        {mode === "team" && activeTab === "keywords" && payload.keyword_table ? (
           <KeywordTableTab
             data={payload.keyword_table}
             filters={keywordFilters || {

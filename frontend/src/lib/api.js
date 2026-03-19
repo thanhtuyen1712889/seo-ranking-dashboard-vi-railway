@@ -175,6 +175,27 @@ export function createWeeklyInsight(token, projectId) {
   return request(`/api/projects/${projectId}/insights/weekly`, { token, method: "POST" });
 }
 
+export function getWeeklyRangeNote(token, projectId, params = {}) {
+  const query = buildQuery(params);
+  return request(`/api/projects/${projectId}/insights/weekly-note?${query.toString()}`, { token });
+}
+
+export function generateWeeklyRangeNote(token, projectId, payload) {
+  return request(`/api/projects/${projectId}/insights/weekly-note/generate`, {
+    token,
+    method: "POST",
+    body: payload,
+  });
+}
+
+export function pinWeeklyRangeNote(token, projectId, payload) {
+  return request(`/api/projects/${projectId}/insights/weekly-note/pin`, {
+    token,
+    method: "POST",
+    body: payload,
+  });
+}
+
 export function generateDailyNote(token, projectId, payload) {
   return request(`/api/projects/${projectId}/insights/daily-note/generate`, {
     token,

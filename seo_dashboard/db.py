@@ -111,9 +111,12 @@ def init_db() -> None:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 project_id INTEGER NOT NULL,
                 insight_date TEXT NOT NULL,
+                range_end TEXT,
                 insight_type TEXT NOT NULL,
                 cluster_name TEXT,
                 keyword TEXT,
+                author TEXT DEFAULT 'AI',
+                is_pinned INTEGER DEFAULT 0,
                 content_vi TEXT NOT NULL,
                 generated_at TEXT NOT NULL,
                 FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
@@ -172,6 +175,9 @@ def init_db() -> None:
         _ensure_column(connection, "events", "is_manual", "is_manual INTEGER DEFAULT 0")
         _ensure_column(connection, "ai_insights", "cluster_name", "cluster_name TEXT")
         _ensure_column(connection, "ai_insights", "keyword", "keyword TEXT")
+        _ensure_column(connection, "ai_insights", "range_end", "range_end TEXT")
+        _ensure_column(connection, "ai_insights", "author", "author TEXT DEFAULT 'AI'")
+        _ensure_column(connection, "ai_insights", "is_pinned", "is_pinned INTEGER DEFAULT 0")
         connection.commit()
 
 

@@ -18,6 +18,7 @@ from .ai import (
     call_claude,
     fallback_cluster_pattern,
     fallback_keyword_insight,
+    fallback_weekly_range_note,
     fallback_weekly_summary,
 )
 from .auth import (
@@ -333,6 +334,18 @@ class DashboardService:
         return {
             "mode": mode if mode in {"team", "client"} else "team",
             "active_tab": active_tab if active_tab in {"overview", "groups", "keywords"} else "overview",
+            "weekly_note_range": {
+                "from_date": str(
+                    (payload.get("weekly_note_range") or {}).get("from_date")
+                    if isinstance(payload.get("weekly_note_range"), dict)
+                    else ""
+                ).strip(),
+                "to_date": str(
+                    (payload.get("weekly_note_range") or {}).get("to_date")
+                    if isinstance(payload.get("weekly_note_range"), dict)
+                    else ""
+                ).strip(),
+            },
             "group_filters": {
                 "current_date": str(group_filters.get("current_date") or "").strip(),
                 "baseline_date": str(group_filters.get("baseline_date") or "").strip(),
@@ -370,6 +383,10 @@ class DashboardService:
         return {
             "mode": incoming.get("mode") or current.get("mode") or "team",
             "active_tab": incoming.get("active_tab") or current.get("active_tab") or "overview",
+            "weekly_note_range": {
+                **current.get("weekly_note_range", {}),
+                **incoming.get("weekly_note_range", {}),
+            },
             "group_filters": {
                 **current.get("group_filters", {}),
                 **incoming.get("group_filters", {}),
@@ -1088,6 +1105,8 @@ class DashboardService:
         active_tab = view_state.get("active_tab") or "overview"
         if view_mode == "client" and active_tab == "keywords":
             active_tab = "overview"
+        if view_mode == "client":
+            keyword_table = None
         return {
             "requires_password": False,
             "share_type": share["share_type"],
@@ -1162,6 +1181,8 @@ class DashboardService:
         if selected_group_view is None and group_views:
             selected_group_view = next(iter(group_views.values()))
         keyword_table = snapshot.get("keyword_table")
+        if self._public_view_mode(share["share_type"], view_state) != "team":
+            keyword_table = None
         payload = self._public_payload_base(share, view_state, keyword_table)
         payload.update(
             {
@@ -1321,6 +1342,361 @@ class DashboardService:
             insight = dict(row)
             pinned.setdefault(insight["insight_date"], insight)
         return pinned
+
+    def _load_pinned_weekly_range_note(
+        self,
+        project_id: int,
+        from_date: str,
+        to_date: str,
+    ) -> dict[str, Any] | None:
+        with get_connection() as connection:
+            row = connection.execute(
+                """
+                SELECT *
+                FROM ai_insights
+                WHERE project_id = ?
+                  AND insight_type = 'weekly_range_note'
+                  AND insight_date = ?
+                  AND COALESCE(range_end, '') = ?
+                  AND is_pinned = 1
+                ORDER BY generated_at DESC, id DESC
+                LIMIT 1
+                """,
+                (project_id, from_date, to_date),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def _resolve_weekly_note_range(
+        self,
+        dates: list[str],
+        from_date: str | None,
+        to_date: str | None,
+    ) -> dict[str, Any]:
+        if not dates:
+            raise ValueError("Project chưa có dữ liệu để tạo nhận xét.")
+        resolved_to = to_date if to_date in dates else dates[-1]
+        default_from = dates[max(0, len(dates) - 7)]
+        resolved_from = from_date if from_date in dates else default_from
+        start_index = dates.index(resolved_from)
+        end_index = dates.index(resolved_to)
+        if start_index > end_index:
+            start_index, end_index = end_index, start_index
+            resolved_from, resolved_to = dates[start_index], dates[end_index]
+        current_dates = dates[start_index : end_index + 1]
+        period_length = len(current_dates)
+        previous_dates = dates[max(0, start_index - period_length) : start_index]
+        long_term_dates = dates[:start_index]
+        return {
+            "from_date": resolved_from,
+            "to_date": resolved_to,
+            "current_dates": current_dates,
+            "compare_from_date": previous_dates[0] if previous_dates else None,
+            "compare_to_date": previous_dates[-1] if previous_dates else None,
+            "compare_dates": previous_dates,
+            "baseline_from_date": long_term_dates[0] if long_term_dates else None,
+            "baseline_to_date": long_term_dates[-1] if long_term_dates else None,
+            "baseline_dates": long_term_dates,
+        }
+
+    def _build_weekly_note_context(
+        self,
+        project_id: int,
+        from_date: str | None,
+        to_date: str | None,
+    ) -> dict[str, Any]:
+        dates = self.get_project_dates(project_id)
+        resolved_range = self._resolve_weekly_note_range(dates, from_date, to_date)
+        keywords = self._load_keywords_with_history(project_id)
+        current_dates = resolved_range["current_dates"]
+        compare_dates = resolved_range["compare_dates"]
+        baseline_dates = resolved_range["baseline_dates"]
+
+        metrics: dict[str, dict[str, Any]] = {}
+        for keyword in keywords:
+            group_name = keyword.get("group_name") or "Chưa phân nhóm"
+            current_positions = [
+                float(position)
+                for rank_date in current_dates
+                if (position := self._history_position(keyword["history"], rank_date)) is not None
+            ]
+            if not current_positions:
+                continue
+            compare_positions = [
+                float(position)
+                for rank_date in compare_dates
+                if (position := self._history_position(keyword["history"], rank_date)) is not None
+            ]
+            baseline_positions = [
+                float(position)
+                for rank_date in baseline_dates
+                if (position := self._history_position(keyword["history"], rank_date)) is not None
+            ]
+            entry = metrics.setdefault(
+                group_name,
+                {
+                    "name": group_name,
+                    "keyword_count": 0,
+                    "kpi_targets": [],
+                    "volumes": [],
+                    "current_positions": [],
+                    "compare_positions": [],
+                    "baseline_positions": [],
+                    "latest_ranks": [],
+                },
+            )
+            entry["keyword_count"] += 1
+            entry["current_positions"].extend(current_positions)
+            entry["compare_positions"].extend(compare_positions)
+            entry["baseline_positions"].extend(baseline_positions)
+            entry["kpi_targets"].append(int(keyword.get("kpi_target") or 10))
+            if keyword.get("search_volume") is not None:
+                entry["volumes"].append(float(keyword["search_volume"]))
+            latest_rank = self._history_position(keyword["history"], current_dates[-1])
+            if latest_rank is not None:
+                entry["latest_ranks"].append(float(latest_rank))
+
+        max_total_volume = max((sum(entry["volumes"]) for entry in metrics.values()), default=1.0)
+        group_rows: list[dict[str, Any]] = []
+        for entry in metrics.values():
+            avg_rank_current = safe_mean(entry["current_positions"])
+            avg_rank_previous = safe_mean(entry["compare_positions"])
+            long_term_avg = safe_mean(entry["baseline_positions"])
+            compare_reference = avg_rank_previous if avg_rank_previous is not None else long_term_avg
+            rank_delta = (
+                round(float(compare_reference - avg_rank_current), 2)
+                if avg_rank_current is not None and compare_reference is not None
+                else 0.0
+            )
+            if rank_delta >= 2:
+                trend_status = "rising"
+            elif rank_delta <= -2:
+                trend_status = "declining"
+            else:
+                trend_status = "stable"
+            total_volume = int(sum(entry["volumes"]))
+            volume_component = clamp((total_volume / max_total_volume) * 100 if max_total_volume else 0, 0, 100)
+            rank_component = (
+                clamp((101 - avg_rank_current) / 100 * 100, 0, 100)
+                if avg_rank_current is not None
+                else 0
+            )
+            trend_component = clamp(50 + rank_delta * 12, 0, 100)
+            health_score = int(round((rank_component * 0.5) + (trend_component * 0.3) + (volume_component * 0.2)))
+            group_rows.append(
+                {
+                    "name": entry["name"],
+                    "keyword_count": entry["keyword_count"],
+                    "total_volume": total_volume,
+                    "avg_volume": round(total_volume / entry["keyword_count"], 1) if entry["keyword_count"] else 0,
+                    "avg_rank_current": avg_rank_current,
+                    "avg_rank_previous": avg_rank_previous,
+                    "long_term_avg": long_term_avg,
+                    "rank_delta": rank_delta,
+                    "trend_status": trend_status,
+                    "health_score": health_score,
+                    "latest_avg_rank": safe_mean(entry["latest_ranks"]),
+                    "kpi_target": Counter(entry["kpi_targets"]).most_common(1)[0][0] if entry["kpi_targets"] else 10,
+                }
+            )
+
+        group_rows.sort(
+            key=lambda item: (
+                -(item.get("health_score") or 0),
+                -(item.get("rank_delta") or 0),
+                item.get("avg_rank_current") or 999,
+            )
+        )
+
+        opportunities = sorted(
+            [
+                item
+                for item in group_rows
+                if item["trend_status"] == "rising" and (item.get("avg_rank_current") or 999) > 5
+            ],
+            key=lambda item: (-(item.get("rank_delta") or 0), -(item.get("health_score") or 0)),
+        )
+        watchlist = sorted(
+            [
+                item
+                for item in group_rows
+                if item["trend_status"] == "declining" or (item.get("health_score") or 0) < 55
+            ],
+            key=lambda item: ((item.get("rank_delta") or 0), item.get("health_score") or 0),
+        )
+
+        overall_delta = safe_mean([float(item["rank_delta"]) for item in group_rows]) or 0.0
+        compare_label = (
+            f"{format_date_label(resolved_range['compare_from_date'])} - {format_date_label(resolved_range['compare_to_date'])}"
+            if resolved_range["compare_from_date"] and resolved_range["compare_to_date"]
+            else "kỳ trước tương đương"
+        )
+        baseline_label = (
+            f"baseline {format_date_label(resolved_range['baseline_from_date'])} - {format_date_label(resolved_range['baseline_to_date'])}"
+            if resolved_range["baseline_from_date"] and resolved_range["baseline_to_date"]
+            else "baseline dài hạn"
+        )
+
+        return {
+            **resolved_range,
+            "project_id": str(project_id),
+            "from_label": format_date_label(resolved_range["from_date"]),
+            "to_label": format_date_label(resolved_range["to_date"]),
+            "compare_label": compare_label,
+            "baseline_label": baseline_label,
+            "overall_delta": overall_delta,
+            "groups": group_rows,
+            "opportunities": opportunities[:3],
+            "watchlist": watchlist[:3],
+        }
+
+    def _weekly_note_payload(
+        self,
+        *,
+        context: dict[str, Any],
+        content: str,
+        generated_at: str,
+        is_pinned: bool,
+        author: str,
+        source: str,
+    ) -> dict[str, Any]:
+        return {
+            "project_id": context["project_id"],
+            "insight_type": "weekly_range_note",
+            "from_date": context["from_date"],
+            "to_date": context["to_date"],
+            "compare_from_date": context["compare_from_date"],
+            "compare_to_date": context["compare_to_date"],
+            "baseline_from_date": context["baseline_from_date"],
+            "baseline_to_date": context["baseline_to_date"],
+            "content_vi": content,
+            "generated_at": generated_at,
+            "saved_at": generated_at if is_pinned else None,
+            "author": author,
+            "is_pinned": is_pinned,
+            "source": source,
+            "summary": {
+                "groups": context["groups"][:5],
+                "opportunities": context["opportunities"],
+                "watchlist": context["watchlist"],
+            },
+        }
+
+    def generate_weekly_range_note(
+        self,
+        project_id: int,
+        *,
+        from_date: str | None = None,
+        to_date: str | None = None,
+        seo_input: str = "",
+        force: bool = False,
+        allow_ai: bool = True,
+    ) -> dict[str, Any]:
+        context = self._build_weekly_note_context(project_id, from_date, to_date)
+        if not force:
+            pinned = self._load_pinned_weekly_range_note(
+                project_id,
+                context["from_date"],
+                context["to_date"],
+            )
+            if pinned:
+                return self._weekly_note_payload(
+                    context=context,
+                    content=str(pinned.get("content_vi") or ""),
+                    generated_at=str(pinned.get("generated_at") or now_iso()),
+                    is_pinned=True,
+                    author=str(pinned.get("author") or "AI"),
+                    source="saved",
+                )
+
+        data_payload = {
+            "current_range": {
+                "from_date": context["from_date"],
+                "to_date": context["to_date"],
+            },
+            "compare_range": {
+                "from_date": context["compare_from_date"],
+                "to_date": context["compare_to_date"],
+            },
+            "baseline_range": {
+                "from_date": context["baseline_from_date"],
+                "to_date": context["baseline_to_date"],
+            },
+            "groups": context["groups"][:6],
+            "opportunities": context["opportunities"],
+            "watchlist": context["watchlist"],
+            "seo_input": seo_input.strip() or None,
+        }
+        prompt = (
+            "Bạn là SEO analyst đang đọc dữ liệu từ dashboard SEO.\n"
+            f"Dữ liệu hiện tại: {data_payload}\n"
+            "Hãy viết nhận xét bằng tiếng Việt, ngắn gọn, bám sát dữ liệu và chia đúng 3 phần:\n"
+            "Tổng quan: 1-2 câu, nêu nhóm nào đang kéo tăng hoặc chậm lại trong khoảng ngày đang chọn.\n"
+            "Điểm sáng: 1-3 câu, ưu tiên tín hiệu tích cực, cụm/nhóm đang tăng, cơ hội mới.\n"
+            "Điểm cần chú ý / Nhận định: 1-3 câu, nêu nhóm giảm, dưới trung bình hoặc cần theo dõi, và kết thúc bằng hành động ngắn.\n"
+            "Không viết chung chung. Phải nhắc tới tên nhóm/cụm có trong dữ liệu."
+        )
+        api_key = self._project_api_key(project_id) if allow_ai else None
+        content = call_claude(prompt, api_key) or fallback_weekly_range_note(context)
+        return self._weekly_note_payload(
+            context=context,
+            content=content,
+            generated_at=now_iso(),
+            is_pinned=False,
+            author="AI",
+            source="generated",
+        )
+
+    def save_weekly_range_note(
+        self,
+        project_id: int,
+        *,
+        from_date: str | None,
+        to_date: str | None,
+        content: str,
+        author: str = "AI",
+    ) -> dict[str, Any]:
+        context = self._build_weekly_note_context(project_id, from_date, to_date)
+        note = content.strip()
+        if not note:
+            raise ValueError("Nội dung nhận xét không được để trống.")
+        resolved_author = author.strip() or "AI"
+        generated_at = now_iso()
+        with transaction() as connection:
+            connection.execute(
+                """
+                DELETE FROM ai_insights
+                WHERE project_id = ?
+                  AND insight_type = 'weekly_range_note'
+                  AND insight_date = ?
+                  AND COALESCE(range_end, '') = ?
+                """,
+                (project_id, context["from_date"], context["to_date"]),
+            )
+            connection.execute(
+                """
+                INSERT INTO ai_insights (
+                    project_id, insight_date, range_end, insight_type, cluster_name,
+                    keyword, author, is_pinned, content_vi, generated_at
+                )
+                VALUES (?, ?, ?, 'weekly_range_note', NULL, NULL, ?, 1, ?, ?)
+                """,
+                (
+                    project_id,
+                    context["from_date"],
+                    context["to_date"],
+                    resolved_author,
+                    note,
+                    generated_at,
+                ),
+            )
+        return self._weekly_note_payload(
+            context=context,
+            content=note,
+            generated_at=generated_at,
+            is_pinned=True,
+            author=resolved_author,
+            source="saved",
+        )
 
     def _history_position(self, history: list[dict[str, Any]], rank_date: str) -> float | None:
         for item in history:
@@ -2366,6 +2742,22 @@ class DashboardService:
                 "latest_insight": latest_insights.get("weekly_summary"),
                 "pinned_notes": {},
             }
+        saved_weekly_range = (
+            project.get("saved_view_state", {}).get("weekly_note_range", {})
+            if isinstance(project.get("saved_view_state"), dict)
+            else {}
+        )
+        latest_note = latest_insights.get("weekly_summary")
+        try:
+            latest_note = self.generate_weekly_range_note(
+                project_id,
+                from_date=saved_weekly_range.get("from_date") or None,
+                to_date=saved_weekly_range.get("to_date") or None,
+                force=False,
+                allow_ai=False,
+            )
+        except Exception:
+            latest_note = latest_note
         latest_date = dates[-1]
         previous_date = dates[-2] if len(dates) >= 2 else None
         group_metrics = self._build_group_metrics(keywords, latest_date, previous_date)
@@ -2469,7 +2861,7 @@ class DashboardService:
             "subtitle": subtitle,
             "kpi_chips": kpi_chips,
             "summary_cards": summary_cards,
-            "latest_insight": latest_insights.get("weekly_summary"),
+            "latest_insight": latest_note,
             "events": events[:20],
             "timeline": timeline,
             "group_names": group_names,

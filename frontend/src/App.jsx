@@ -14,8 +14,8 @@ import {
   createProject,
   createReportSnapshotShare,
   createSeoViewShare,
-  createWeeklyInsight,
   exportKeywords,
+  generateWeeklyRangeNote,
   generateKeywordInsight,
   getGroupView,
   getKeywordDetail,
@@ -24,12 +24,13 @@ import {
   getProjects,
   getSettings,
   getStoredSession,
+  getWeeklyRangeNote,
   login,
+  pinWeeklyRangeNote,
   reclusterProject,
   refreshProject,
   saveProjectViewState,
   saveKeywordNotes,
-  saveWeeklyNote,
   storeSession,
   testGoogleSheet,
   updateSettings,
@@ -69,6 +70,11 @@ export default function App() {
   const [settings, setSettings] = useState(null);
   const [groupView, setGroupView] = useState(null);
   const [keywordTable, setKeywordTable] = useState(null);
+  const [weeklyNote, setWeeklyNote] = useState(null);
+  const [weeklyNoteRange, setWeeklyNoteRange] = useState({
+    from_date: "",
+    to_date: "",
+  });
   const [detailOpen, setDetailOpen] = useState(false);
   const [keywordDetail, setKeywordDetail] = useState(null);
   const [noteDraft, setNoteDraft] = useState("");
@@ -80,6 +86,7 @@ export default function App() {
   const [creatingProject, setCreatingProject] = useState(false);
   const [generatingInsight, setGeneratingInsight] = useState(false);
   const [savingWeeklyNote, setSavingWeeklyNote] = useState(false);
+  const [weeklyNoteLoading, setWeeklyNoteLoading] = useState(false);
   const [addingEvent, setAddingEvent] = useState(false);
   const [dragActive, setDragActive] = useState(false);
   const [savingNotes, setSavingNotes] = useState(false);
@@ -157,6 +164,8 @@ export default function App() {
   useEffect(() => {
     if (!selectedProjectId || !token) return;
     setViewStateReady(false);
+    setWeeklyNote(null);
+    setWeeklyNoteRange({ from_date: "", to_date: "" });
     setShareResult({
       client_view_url: "",
       client_view_password: "",
@@ -198,6 +207,34 @@ export default function App() {
   ]);
 
   useEffect(() => {
+    if (!selectedProjectId || !token || !weeklyNoteRange.from_date || !weeklyNoteRange.to_date) return;
+    let cancelled = false;
+    setWeeklyNoteLoading(true);
+    getWeeklyRangeNote(token, selectedProjectId, weeklyNoteRange)
+      .then((response) => {
+        if (cancelled) return;
+        setWeeklyNote(response);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setToast({ type: "error", message: error.message });
+      })
+      .finally(() => {
+        if (!cancelled) setWeeklyNoteLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    selectedProjectId,
+    token,
+    weeklyNoteRange.from_date,
+    weeklyNoteRange.to_date,
+    overview?.project?.last_pulled_at,
+    overview?.dates?.length,
+  ]);
+
+  useEffect(() => {
     if (!toast) return;
     const timer = window.setTimeout(() => setToast(null), 3200);
     return () => window.clearTimeout(timer);
@@ -209,6 +246,7 @@ export default function App() {
       saveProjectViewState(token, selectedProjectId, {
         mode,
         active_tab: activeTab,
+        weekly_note_range: weeklyNoteRange,
         group_filters: groupFilters,
         keyword_filters: keywordFilters,
       }).catch(() => {});
@@ -220,6 +258,8 @@ export default function App() {
     viewStateReady,
     mode,
     activeTab,
+    weeklyNoteRange.from_date,
+    weeklyNoteRange.to_date,
     groupFilters.current_date,
     groupFilters.baseline_date,
     groupFilters.status,
@@ -257,6 +297,8 @@ export default function App() {
         setOverview(null);
         setGroupView(null);
         setKeywordTable(null);
+        setWeeklyNote(null);
+        setWeeklyNoteRange({ from_date: "", to_date: "" });
         setSettings(null);
       }
     } catch (error) {
@@ -276,6 +318,7 @@ export default function App() {
       const savedState = settingsResponse?.project?.saved_view_state || overviewResponse?.project?.saved_view_state || {};
       const savedGroupFilters = savedState.group_filters || {};
       const savedKeywordFilters = savedState.keyword_filters || {};
+      const savedWeeklyRange = savedState.weekly_note_range || {};
       if (!preserveExisting) {
         const nextMode = savedState.mode === CLIENT_MODE ? CLIENT_MODE : TEAM_MODE;
         setMode(nextMode);
@@ -286,6 +329,17 @@ export default function App() {
       if (dates.length) {
         const current = dates[dates.length - 1];
         const baseline = dates[dates.length - 2] || dates[0];
+        const defaultWeeklyFrom = dates[Math.max(0, dates.length - 7)];
+        const nextWeeklyRange = {
+          from_date:
+            (preserveExisting && weeklyNoteRange.from_date && dates.includes(weeklyNoteRange.from_date) && weeklyNoteRange.from_date) ||
+            (savedWeeklyRange.from_date && dates.includes(savedWeeklyRange.from_date) && savedWeeklyRange.from_date) ||
+            defaultWeeklyFrom,
+          to_date:
+            (preserveExisting && weeklyNoteRange.to_date && dates.includes(weeklyNoteRange.to_date) && weeklyNoteRange.to_date) ||
+            (savedWeeklyRange.to_date && dates.includes(savedWeeklyRange.to_date) && savedWeeklyRange.to_date) ||
+            current,
+        };
         const resolvedCurrentGroupDate =
           (preserveExisting && groupFilters.current_date && dates.includes(groupFilters.current_date) && groupFilters.current_date) ||
           (savedGroupFilters.current_date && dates.includes(savedGroupFilters.current_date) && savedGroupFilters.current_date) ||
@@ -325,6 +379,7 @@ export default function App() {
             savedKeywordFilters.movers_only ??
             false,
         };
+        setWeeklyNoteRange(nextWeeklyRange);
         setGroupFilters(nextGroupFilters);
         setKeywordFilters(nextKeywordFilters);
         setManualEvent((previous) => ({
@@ -343,6 +398,8 @@ export default function App() {
       } else {
         setGroupView(null);
         setKeywordTable(null);
+        setWeeklyNote(null);
+        setWeeklyNoteRange({ from_date: "", to_date: "" });
       }
     } catch (error) {
       setToast({ type: "error", message: error.message });
@@ -377,6 +434,8 @@ export default function App() {
     setOverview(null);
     setGroupView(null);
     setKeywordTable(null);
+    setWeeklyNote(null);
+    setWeeklyNoteRange({ from_date: "", to_date: "" });
     setKeywordDetail(null);
     setDetailOpen(false);
   }
@@ -466,9 +525,9 @@ export default function App() {
     if (!selectedProjectId) return;
     setGeneratingInsight(true);
     try {
-      await createWeeklyInsight(token, selectedProjectId);
-      await loadOverviewAndSettings(selectedProjectId);
-      setToast({ type: "success", message: "Đã tạo insight tuần mới." });
+      const response = await generateWeeklyRangeNote(token, selectedProjectId, weeklyNoteRange);
+      setWeeklyNote(response);
+      setToast({ type: "success", message: "Đã tạo nhận xét mới theo dữ liệu hiện tại." });
     } catch (error) {
       setToast({ type: "error", message: error.message });
     } finally {
@@ -476,13 +535,17 @@ export default function App() {
     }
   }
 
-  async function handleSaveWeeklyNote(content) {
+  async function handleSaveWeeklyNote(content, author = "User") {
     if (!selectedProjectId) return;
     setSavingWeeklyNote(true);
     try {
-      await saveWeeklyNote(token, selectedProjectId, content);
-      await loadOverviewAndSettings(selectedProjectId);
-      setToast({ type: "success", message: "Đã lưu nhận xét tuần." });
+      const response = await pinWeeklyRangeNote(token, selectedProjectId, {
+        ...weeklyNoteRange,
+        content,
+        author,
+      });
+      setWeeklyNote(response);
+      setToast({ type: "success", message: "Đã lưu và ghim nhận xét cho khoảng ngày này." });
     } catch (error) {
       setToast({ type: "error", message: error.message });
     } finally {
@@ -604,6 +667,7 @@ export default function App() {
     return {
       mode: targetMode,
       active_tab: targetMode === CLIENT_MODE && activeTab === "keywords" ? "overview" : activeTab,
+      weekly_note_range: weeklyNoteRange,
       group_filters: groupFilters,
       keyword_filters: keywordFilters,
     };
@@ -804,6 +868,10 @@ export default function App() {
           <OverviewTab
             overview={overview}
             mode={mode}
+            weeklyNote={weeklyNote}
+            weeklyNoteRange={weeklyNoteRange}
+            setWeeklyNoteRange={setWeeklyNoteRange}
+            weeklyNoteLoading={weeklyNoteLoading}
             generatingInsight={generatingInsight}
             onGenerateInsight={handleGenerateWeeklyInsight}
             onSaveWeeklyNote={handleSaveWeeklyNote}

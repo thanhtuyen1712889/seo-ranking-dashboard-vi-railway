@@ -282,6 +282,51 @@ def weekly_insight(project_id: int, _: dict[str, Any] = Depends(require_auth)) -
     return service.generate_weekly_summary(project_id, force=True)
 
 
+@app.get("/api/projects/{project_id}/insights/weekly-note")
+def get_weekly_note(
+    project_id: int,
+    from_date: str | None = Query(default=None),
+    to_date: str | None = Query(default=None),
+    _: dict[str, Any] = Depends(require_auth),
+) -> dict[str, Any]:
+    return service.generate_weekly_range_note(
+        project_id,
+        from_date=from_date,
+        to_date=to_date,
+        force=False,
+    )
+
+
+@app.post("/api/projects/{project_id}/insights/weekly-note/generate")
+def generate_weekly_note(
+    project_id: int,
+    payload: dict[str, Any] = Body(default={}),
+    _: dict[str, Any] = Depends(require_auth),
+) -> dict[str, Any]:
+    return service.generate_weekly_range_note(
+        project_id,
+        from_date=str(payload.get("from_date") or "").strip() or None,
+        to_date=str(payload.get("to_date") or "").strip() or None,
+        seo_input=str(payload.get("seo_input") or ""),
+        force=True,
+    )
+
+
+@app.post("/api/projects/{project_id}/insights/weekly-note/pin")
+def pin_weekly_note(
+    project_id: int,
+    payload: dict[str, Any] = Body(default={}),
+    _: dict[str, Any] = Depends(require_auth),
+) -> dict[str, Any]:
+    return service.save_weekly_range_note(
+        project_id,
+        from_date=str(payload.get("from_date") or "").strip() or None,
+        to_date=str(payload.get("to_date") or "").strip() or None,
+        content=str(payload.get("content") or ""),
+        author=str(payload.get("author") or "AI"),
+    )
+
+
 @app.post("/api/projects/{project_id}/insights/daily-note/generate")
 def generate_daily_note(
     project_id: int,
