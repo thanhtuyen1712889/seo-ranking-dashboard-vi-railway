@@ -59,6 +59,7 @@ def init_db() -> None:
                 source_type TEXT DEFAULT 'upload',
                 refresh_interval_minutes INTEGER DEFAULT 30,
                 anthropic_api_key TEXT,
+                saved_view_state TEXT DEFAULT '{}',
                 last_pulled_at TEXT,
                 created_at TEXT NOT NULL
             );
@@ -129,11 +130,26 @@ def init_db() -> None:
                 FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
             );
 
+            CREATE TABLE IF NOT EXISTS shared_views (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER NOT NULL,
+                share_type TEXT NOT NULL,
+                share_token TEXT NOT NULL UNIQUE,
+                title TEXT,
+                password_hash TEXT,
+                state_json TEXT NOT NULL,
+                snapshot_json TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+            );
+
             CREATE INDEX IF NOT EXISTS idx_keywords_project ON keywords(project_id);
             CREATE INDEX IF NOT EXISTS idx_keywords_group ON keywords(project_id, group_name);
             CREATE INDEX IF NOT EXISTS idx_rankings_keyword_date ON rankings(keyword_id, rank_date);
             CREATE INDEX IF NOT EXISTS idx_events_project_date ON events(project_id, event_date);
             CREATE INDEX IF NOT EXISTS idx_ai_project_date ON ai_insights(project_id, insight_date);
+            CREATE INDEX IF NOT EXISTS idx_shared_views_project ON shared_views(project_id, share_type);
             """
         )
 
@@ -147,6 +163,7 @@ def init_db() -> None:
             "refresh_interval_minutes INTEGER DEFAULT 30",
         )
         _ensure_column(connection, "projects", "anthropic_api_key", "anthropic_api_key TEXT")
+        _ensure_column(connection, "projects", "saved_view_state", "saved_view_state TEXT DEFAULT '{}'")
         _ensure_column(connection, "keywords", "sub_cluster_name", "sub_cluster_name TEXT")
         _ensure_column(connection, "keywords", "target_url", "target_url TEXT")
         _ensure_column(connection, "keywords", "found_url", "found_url TEXT")

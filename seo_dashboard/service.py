@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import io
+import json
 import os
 import re
+import secrets
 from collections import Counter, defaultdict
 from datetime import datetime
 from math import log
@@ -17,6 +19,13 @@ from .ai import (
     fallback_cluster_pattern,
     fallback_keyword_insight,
     fallback_weekly_summary,
+)
+from .auth import (
+    PUBLIC_VIEW_TTL_SECONDS,
+    create_public_view_token,
+    hash_view_password,
+    verify_public_view_token,
+    verify_view_password,
 )
 from .db import get_connection, transaction
 from .ingestion import (
@@ -300,6 +309,129 @@ class DashboardService:
         # The database is initialized by main.py on startup.
         return None
 
+    def _load_json_blob(self, value: Any, fallback: Any) -> Any:
+        if isinstance(value, (dict, list)):
+            return value
+        if value in (None, "", b""):
+            return fallback
+        try:
+            return json.loads(value)
+        except (TypeError, json.JSONDecodeError):
+            return fallback
+
+    def _project_payload(self, row: Any) -> dict[str, Any]:
+        project = dict(row)
+        project["saved_view_state"] = self._load_json_blob(project.get("saved_view_state"), {})
+        return project
+
+    def _normalize_view_state(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        payload = payload or {}
+        group_filters = payload.get("group_filters") if isinstance(payload.get("group_filters"), dict) else {}
+        keyword_filters = payload.get("keyword_filters") if isinstance(payload.get("keyword_filters"), dict) else {}
+        mode = str(payload.get("mode") or "team").strip().lower()
+        active_tab = str(payload.get("active_tab") or "overview").strip().lower()
+        return {
+            "mode": mode if mode in {"team", "client"} else "team",
+            "active_tab": active_tab if active_tab in {"overview", "groups", "keywords"} else "overview",
+            "group_filters": {
+                "current_date": str(group_filters.get("current_date") or "").strip(),
+                "baseline_date": str(group_filters.get("baseline_date") or "").strip(),
+                "status": str(group_filters.get("status") or "all").strip() or "all",
+                "main_cluster": str(group_filters.get("main_cluster") or "").strip(),
+                "tag": str(group_filters.get("tag") or "all").strip() or "all",
+                "sort_by": str(group_filters.get("sort_by") or "health_score").strip() or "health_score",
+                "active_scenario_id": str(
+                    group_filters.get("active_scenario_id")
+                    or group_filters.get("sub_cluster_mode")
+                    or ""
+                ).strip(),
+            },
+            "keyword_filters": {
+                "current_date": str(keyword_filters.get("current_date") or "").strip(),
+                "search": str(keyword_filters.get("search") or "").strip(),
+                "groups": str(keyword_filters.get("groups") or "").strip(),
+                "clusters": str(keyword_filters.get("clusters") or "").strip(),
+                "status": str(keyword_filters.get("status") or "all").strip() or "all",
+                "vol_min": int(keyword_filters.get("vol_min") or 0),
+                "vol_max": int(keyword_filters.get("vol_max") or 1000000),
+                "rank_min": float(keyword_filters.get("rank_min") or 0),
+                "rank_max": float(keyword_filters.get("rank_max") or 101),
+                "movers_only": bool(keyword_filters.get("movers_only")),
+            },
+        }
+
+    def _merge_view_state(
+        self,
+        current_state: dict[str, Any] | None,
+        incoming_state: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        current = self._normalize_view_state(current_state)
+        incoming = self._normalize_view_state(incoming_state)
+        return {
+            "mode": incoming.get("mode") or current.get("mode") or "team",
+            "active_tab": incoming.get("active_tab") or current.get("active_tab") or "overview",
+            "group_filters": {
+                **current.get("group_filters", {}),
+                **incoming.get("group_filters", {}),
+            },
+            "keyword_filters": {
+                **current.get("keyword_filters", {}),
+                **incoming.get("keyword_filters", {}),
+            },
+        }
+
+    def _public_base_url(self) -> str:
+        candidates = [
+            os.getenv("PUBLIC_BASE_URL"),
+            os.getenv("RENDER_EXTERNAL_URL"),
+            os.getenv("RAILWAY_PUBLIC_DOMAIN"),
+            os.getenv("APP_BASE_URL"),
+        ]
+        for candidate in candidates:
+            if not candidate:
+                continue
+            value = candidate.strip().rstrip("/")
+            if not value:
+                continue
+            if value.startswith(("http://", "https://")):
+                return value
+            return f"https://{value}"
+        return "http://localhost:8000"
+
+    def _share_url(self, share_type: str, share_token: str) -> str:
+        path = "client" if share_type == "client_view" else "report"
+        return f"{self._public_base_url()}/{path}/{share_token}"
+
+    def _share_payload(self, row: Any) -> dict[str, Any]:
+        share = dict(row)
+        share["state_json"] = self._load_json_blob(share.get("state_json"), {})
+        share["snapshot_json"] = self._load_json_blob(share.get("snapshot_json"), None)
+        share["url"] = self._share_url(share["share_type"], share["share_token"])
+        return share
+
+    def _latest_share_links(self, project_id: int) -> dict[str, str | None]:
+        with get_connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT share_type, share_token
+                FROM shared_views
+                WHERE project_id = ?
+                ORDER BY updated_at DESC, id DESC
+                """,
+                (project_id,),
+            ).fetchall()
+        latest: dict[str, str | None] = {
+            "client_view_url": None,
+            "report_snapshot_url": None,
+        }
+        for row in rows:
+            share_type = row["share_type"]
+            if share_type == "client_view" and not latest["client_view_url"]:
+                latest["client_view_url"] = self._share_url(share_type, row["share_token"])
+            if share_type == "report_snapshot" and not latest["report_snapshot_url"]:
+                latest["report_snapshot_url"] = self._share_url(share_type, row["share_token"])
+        return latest
+
     def list_projects(self) -> list[dict[str, Any]]:
         with get_connection() as connection:
             rows = connection.execute(
@@ -315,14 +447,14 @@ class DashboardService:
                 ORDER BY p.created_at DESC
                 """
             ).fetchall()
-        return [dict(row) for row in rows]
+        return [self._project_payload(row) for row in rows]
 
     def get_project(self, project_id: int) -> dict[str, Any]:
         with get_connection() as connection:
             row = connection.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
         if not row:
             raise ValueError("Không tìm thấy project.")
-        return dict(row)
+        return self._project_payload(row)
 
     def create_project(
         self,
@@ -733,6 +865,220 @@ class DashboardService:
         return {
             "project": project,
             "clusters": [dict(row) for row in clusters],
+            **self._latest_share_links(project_id),
+            "client_view_password": None,
+        }
+
+    def update_project_view_state(self, project_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+        project = self.get_project(project_id)
+        merged_state = self._merge_view_state(project.get("saved_view_state"), payload)
+        with transaction() as connection:
+            connection.execute(
+                "UPDATE projects SET saved_view_state = ? WHERE id = ?",
+                (json.dumps(merged_state, ensure_ascii=True), project_id),
+            )
+        return {
+            "project_id": str(project_id),
+            "saved_view_state": merged_state,
+        }
+
+    def _load_share(self, share_token: str) -> dict[str, Any]:
+        with get_connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM shared_views WHERE share_token = ?",
+                (share_token,),
+            ).fetchone()
+        if not row:
+            raise ValueError("Không tìm thấy link chia sẻ.")
+        return self._share_payload(row)
+
+    def _share_state_payload(
+        self,
+        project_id: int,
+        incoming_state: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        project = self.get_project(project_id)
+        merged_state = self._merge_view_state(project.get("saved_view_state"), incoming_state)
+        self.update_project_view_state(project_id, merged_state)
+        return merged_state
+
+    def _build_snapshot_bundle(self, project_id: int, view_state: dict[str, Any]) -> dict[str, Any]:
+        group_filters = view_state.get("group_filters", {})
+        overview = self.get_overview(project_id)
+        base_group_view = self.get_group_view(
+            project_id,
+            current_date=group_filters.get("current_date") or None,
+            baseline_date=group_filters.get("baseline_date") or None,
+            status_filter=group_filters.get("status") or "all",
+            main_cluster=group_filters.get("main_cluster") or None,
+            tag_filter=group_filters.get("tag") or "all",
+            sort_by=group_filters.get("sort_by") or "health_score",
+            active_scenario_id=group_filters.get("active_scenario_id") or None,
+        )
+        scenario_views = {}
+        for scenario in base_group_view.get("scenarios", []):
+            scenario_views[scenario["scenario_id"]] = self.get_group_view(
+                project_id,
+                current_date=group_filters.get("current_date") or None,
+                baseline_date=group_filters.get("baseline_date") or None,
+                status_filter=group_filters.get("status") or "all",
+                main_cluster=group_filters.get("main_cluster") or None,
+                tag_filter=group_filters.get("tag") or "all",
+                sort_by=group_filters.get("sort_by") or "health_score",
+                active_scenario_id=scenario["scenario_id"],
+            )
+        return {
+            "project": self.get_project(project_id),
+            "overview": overview,
+            "view_state": view_state,
+            "group_views": scenario_views,
+            "created_at": now_iso(),
+        }
+
+    def _create_share(
+        self,
+        project_id: int,
+        *,
+        share_type: str,
+        title: str | None = None,
+        password: str | None = None,
+        state: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        project = self.get_project(project_id)
+        view_state = self._share_state_payload(project_id, state)
+        snapshot_json = None
+        if share_type == "report_snapshot":
+            snapshot_json = self._build_snapshot_bundle(project_id, view_state)
+        share_token = secrets.token_urlsafe(18)
+        current_time = now_iso()
+        resolved_password = (password or "").strip()
+        with transaction() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO shared_views (
+                    project_id, share_type, share_token, title, password_hash,
+                    state_json, snapshot_json, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    project_id,
+                    share_type,
+                    share_token,
+                    (title or "").strip() or f"{project['name']} · {'Client view' if share_type == 'client_view' else 'Report snapshot'}",
+                    hash_view_password(resolved_password) if resolved_password else None,
+                    json.dumps(view_state, ensure_ascii=True),
+                    json.dumps(snapshot_json, ensure_ascii=True) if snapshot_json is not None else None,
+                    current_time,
+                    current_time,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM shared_views WHERE id = ?",
+                (int(cursor.lastrowid),),
+            ).fetchone()
+        share = self._share_payload(row)
+        return {
+            "project_id": str(project_id),
+            "share_type": share_type,
+            "title": share["title"],
+            "client_view_url": share["url"] if share_type == "client_view" else self._latest_share_links(project_id)["client_view_url"],
+            "client_view_password": resolved_password or None,
+            "report_snapshot_url": share["url"] if share_type == "report_snapshot" else self._latest_share_links(project_id)["report_snapshot_url"],
+            "created_at": share["created_at"],
+            "active_scenario_id": view_state.get("group_filters", {}).get("active_scenario_id") or None,
+        }
+
+    def create_client_view_share(self, project_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+        return self._create_share(
+            project_id,
+            share_type="client_view",
+            title=payload.get("title"),
+            password=payload.get("password"),
+            state=payload.get("state"),
+        )
+
+    def create_report_snapshot_share(self, project_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+        return self._create_share(
+            project_id,
+            share_type="report_snapshot",
+            title=payload.get("title"),
+            password=payload.get("password"),
+            state=payload.get("state"),
+        )
+
+    def login_public_share(self, share_token: str, password: str) -> dict[str, Any]:
+        share = self._load_share(share_token)
+        if not verify_view_password(password, share.get("password_hash")):
+            raise ValueError("Mật khẩu link chia sẻ không đúng.")
+        return {
+            "token": create_public_view_token(share_token),
+            "expires_in_seconds": PUBLIC_VIEW_TTL_SECONDS,
+        }
+
+    def get_public_share_payload(
+        self,
+        share_token: str,
+        *,
+        public_token: str | None = None,
+        active_scenario_id: str | None = None,
+    ) -> dict[str, Any]:
+        share = self._load_share(share_token)
+        requires_password = bool(share.get("password_hash"))
+        if requires_password:
+            try:
+                verify_public_view_token(public_token or "", share_token)
+            except Exception:
+                return {
+                    "requires_password": True,
+                    "share_type": share["share_type"],
+                    "title": share["title"],
+                    "project_id": str(share["project_id"]),
+                }
+        if share["share_type"] == "report_snapshot":
+            snapshot = share.get("snapshot_json") or {}
+            group_views = snapshot.get("group_views") or {}
+            requested_scenario_id = active_scenario_id or snapshot.get("view_state", {}).get("group_filters", {}).get("active_scenario_id")
+            selected_group_view = None
+            if requested_scenario_id:
+                selected_group_view = group_views.get(requested_scenario_id)
+            if selected_group_view is None and group_views:
+                selected_group_view = next(iter(group_views.values()))
+            overview = snapshot.get("overview") or self.get_overview(share["project_id"])
+            return {
+                "requires_password": False,
+                "share_type": share["share_type"],
+                "title": share["title"],
+                "project_id": str(share["project_id"]),
+                "project_name": (snapshot.get("project") or {}).get("name") or self.get_project(share["project_id"])["name"],
+                "view_state": snapshot.get("view_state") or share.get("state_json") or {},
+                "overview": overview,
+                "group_view": selected_group_view,
+                "snapshot_created_at": snapshot.get("created_at") or share["created_at"],
+            }
+
+        state = share.get("state_json") or {}
+        group_filters = state.get("group_filters", {})
+        current_group_view = self.get_group_view(
+            share["project_id"],
+            current_date=group_filters.get("current_date") or None,
+            baseline_date=group_filters.get("baseline_date") or None,
+            status_filter=group_filters.get("status") or "all",
+            main_cluster=group_filters.get("main_cluster") or None,
+            tag_filter=group_filters.get("tag") or "all",
+            sort_by=group_filters.get("sort_by") or "health_score",
+            active_scenario_id=active_scenario_id or group_filters.get("active_scenario_id") or None,
+        )
+        return {
+            "requires_password": False,
+            "share_type": share["share_type"],
+            "title": share["title"],
+            "project_id": str(share["project_id"]),
+            "project_name": self.get_project(share["project_id"])["name"],
+            "view_state": state,
+            "overview": self.get_overview(share["project_id"]),
+            "group_view": current_group_view,
+            "snapshot_created_at": share["created_at"],
         }
 
     def recluster_keywords(self, project_id: int) -> dict[str, Any]:
@@ -1124,6 +1470,195 @@ class DashboardService:
             "family_distribution": family_distribution,
         }
 
+    def _topic_distribution(self, tag_profiles: dict[int, dict[str, Any]]) -> dict[str, Any]:
+        total_keywords = len(tag_profiles)
+        per_keyword_topics: list[str] = []
+        topic_counter: Counter[str] = Counter()
+        for profile in tag_profiles.values():
+            topics = [tag for tag in profile["tags"] if tag.startswith("topic:")]
+            if topics:
+                per_keyword_topics.append(topics[0])
+                topic_counter.update(topics)
+        covered = len(per_keyword_topics)
+        coverage = covered / total_keywords if total_keywords else 0.0
+        bucket_counter = Counter(per_keyword_topics)
+        bucket_count = len(bucket_counter)
+        dominant_share = max((count / covered) for count in bucket_counter.values()) if covered else 1.0
+        segmentation_score = min(bucket_count, 4) / 4 if bucket_count else 0.0
+        balance_score = 0.0 if bucket_count <= 1 else 1 - dominant_share
+        score = round((coverage * 0.55) + (segmentation_score * 0.3) + (balance_score * 0.15), 4)
+        return {
+            "coverage": coverage,
+            "bucket_count": bucket_count,
+            "dominant_share": dominant_share,
+            "score": score,
+            "counter": topic_counter,
+            "primary_counter": bucket_counter,
+        }
+
+    def _scenario_label_for_family(self, family: str, is_default: bool = False) -> str:
+        if is_default:
+            return "Góc nhìn mặc định"
+        mapping = {
+            "platform": "Theo brand / nền tảng",
+            "product": "Theo dạng giải pháp",
+            "intent": "Theo nhu cầu / use case",
+        }
+        return mapping.get(family, "Theo nhóm chính")
+
+    def _scenario_description_for_family(self, family: str, secondary_family: str | None, is_default: bool = False) -> str:
+        if is_default:
+            return "Cách gom nhóm rõ nhất và dễ đọc nhất cho bộ dữ liệu hiện tại."
+        mapping = {
+            "platform": "Nhóm keyword theo nền tảng hoặc brand chính; vẫn giữ ngữ cảnh giải pháp trong drill-down.",
+            "product": "Nhóm keyword theo loại giải pháp / dạng sản phẩm, phù hợp cho sales nhìn nhanh các dòng chủ lực.",
+            "intent": "Nhóm keyword theo nhu cầu hoặc use case để nhìn thấy insight theo mục đích tìm kiếm.",
+        }
+        text = mapping.get(family, "Nhóm keyword theo chiều dữ liệu mạnh nhất ở dataset này.")
+        if secondary_family and secondary_family != family:
+            text += f" Khi drill-down vẫn giữ tag {TAG_FAMILY_LABELS[secondary_family]} để đọc ngữ cảnh."
+        return text
+
+    def _build_view_scenarios(
+        self,
+        selected_group: str | None,
+        tag_profiles: dict[int, dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        family_distribution = {
+            family: self._family_distribution(tag_profiles, family)
+            for family in TAG_FAMILY_LABELS
+        }
+        topic_distribution = self._topic_distribution(tag_profiles)
+        default_secondary = {
+            "platform": "product",
+            "product": "platform",
+            "intent": "product",
+        }
+        candidates: list[dict[str, Any]] = []
+        for family, stats in family_distribution.items():
+            if stats["coverage"] < 0.35 or stats["bucket_count"] < 2:
+                continue
+            candidates.append(
+                {
+                    "kind": "family",
+                    "family": family,
+                    "score": stats["score"],
+                    "coverage": stats["coverage"],
+                    "bucket_count": stats["bucket_count"],
+                    "secondary_family": default_secondary.get(family),
+                }
+            )
+        if topic_distribution["coverage"] >= 0.35 and topic_distribution["bucket_count"] >= 2:
+            candidates.append(
+                {
+                    "kind": "topic",
+                    "family": "topic",
+                    "score": topic_distribution["score"],
+                    "coverage": topic_distribution["coverage"],
+                    "bucket_count": topic_distribution["bucket_count"],
+                    "secondary_family": None,
+                }
+            )
+        if not candidates:
+            candidates.append(
+                {
+                    "kind": "family",
+                    "family": "product",
+                    "score": 0.1,
+                    "coverage": 0.0,
+                    "bucket_count": 1,
+                    "secondary_family": "platform",
+                }
+            )
+        candidates.sort(key=lambda item: (item["score"], item["coverage"], item["bucket_count"]), reverse=True)
+        scenarios: list[dict[str, Any]] = []
+        for index, candidate in enumerate(candidates[:3], start=1):
+            is_default = index == 1
+            scenario_id = f"scenario_{index}"
+            if candidate["kind"] == "topic":
+                top_topics = [
+                    self._tag_label(tag)
+                    for tag, _ in topic_distribution["primary_counter"].most_common(3)
+                ]
+                topic_examples = " / ".join(top_topics[:2]) if top_topics else "chủ đề"
+                scenarios.append(
+                    {
+                        "scenario_id": scenario_id,
+                        "scenario_label": "Theo chủ đề nổi bật" if not is_default else "Góc nhìn mặc định",
+                        "scenario_description": (
+                            "Nhóm keyword theo các n-gram lặp lại mạnh nhất trong dataset"
+                            + (f", nổi bật như {topic_examples}." if topic_examples else ".")
+                        ),
+                        "visible_tag_types": [f"type:{scenario_id}"],
+                        "filter_prefixes": ["topic:"],
+                        "strategy": "topic",
+                        "primary_family": "topic",
+                        "secondary_family": None,
+                    }
+                )
+            else:
+                family = candidate["family"]
+                secondary_family = candidate["secondary_family"]
+                family_examples = [
+                    self._tag_label(tag)
+                    for tag, _ in family_distribution[family]["counter"].most_common(2)
+                ]
+                description = self._scenario_description_for_family(
+                    family,
+                    secondary_family,
+                    is_default=is_default,
+                )
+                if family_examples:
+                    description += f" Gợi ý nổi bật: {', '.join(family_examples)}."
+                scenarios.append(
+                    {
+                        "scenario_id": scenario_id,
+                        "scenario_label": self._scenario_label_for_family(family, is_default=is_default),
+                        "scenario_description": description,
+                        "visible_tag_types": [f"type:{scenario_id}"],
+                        "filter_prefixes": [f"{family}:"],
+                        "strategy": "family",
+                        "primary_family": family,
+                        "secondary_family": secondary_family,
+                    }
+                )
+        return scenarios
+
+    def _resolve_active_scenario(
+        self,
+        scenarios: list[dict[str, Any]],
+        requested_scenario_id: str | None,
+        legacy_mode: str | None = None,
+    ) -> dict[str, Any] | None:
+        if not scenarios:
+            return None
+        if requested_scenario_id:
+            explicit = next(
+                (scenario for scenario in scenarios if scenario["scenario_id"] == requested_scenario_id),
+                None,
+            )
+            if explicit:
+                return explicit
+        normalized_mode = self._normalize_sub_cluster_mode(legacy_mode)
+        family_by_mode = {
+            "platform_first": "platform",
+            "product_first": "product",
+            "intent_first": "intent",
+        }
+        preferred_family = family_by_mode.get(normalized_mode)
+        if preferred_family:
+            matched = next(
+                (
+                    scenario
+                    for scenario in scenarios
+                    if scenario.get("primary_family") == preferred_family
+                ),
+                None,
+            )
+            if matched:
+                return matched
+        return scenarios[0]
+
     def _tag_label(self, tag: str) -> str:
         if tag in TAG_LABELS:
             return TAG_LABELS[tag]
@@ -1137,10 +1672,16 @@ class DashboardService:
         self,
         keyword: dict[str, Any],
         tag_profile: dict[str, Any],
-        mode_meta: dict[str, Any],
+        scenario: dict[str, Any],
     ) -> tuple[str, str, list[str]]:
-        primary_family = mode_meta["primary_family"]
-        secondary_family = mode_meta.get("secondary_family")
+        primary_family = scenario["primary_family"]
+        secondary_family = scenario.get("secondary_family")
+        if scenario["strategy"] == "topic":
+            topic_tag = next((tag for tag in tag_profile["tags"] if tag.startswith("topic:")), None)
+            if topic_tag:
+                return topic_tag.replace(":", "__"), self._tag_label(topic_tag), tag_profile["tags"]
+            return "topic__other", "Chủ đề khác", tag_profile["tags"]
+
         primary_tags = tag_profile["family_tags"].get(primary_family, [])
         secondary_tags = tag_profile["family_tags"].get(secondary_family, []) if secondary_family else []
         primary_tag = primary_tags[0] if primary_tags else None
@@ -1149,12 +1690,11 @@ class DashboardService:
         if primary_tag:
             cluster_id = primary_tag.replace(":", "__")
             cluster_label = self._tag_label(primary_tag)
-            if mode_meta["requested_mode"] == "custom" and secondary_tag:
-                cluster_id = f"{cluster_id}__{secondary_tag.replace(':', '__')}"
+            if secondary_tag and scenario.get("secondary_family"):
                 if primary_family == "platform":
-                    cluster_label = f"{cluster_label} - {self._tag_label(secondary_tag)}"
-                else:
-                    cluster_label = f"{cluster_label} ({self._tag_label(secondary_tag)})"
+                    cluster_label = f"{cluster_label}"
+                elif primary_family == "product" and secondary_family == "platform" and primary_tag.startswith("product:"):
+                    cluster_label = f"{cluster_label}"
             return cluster_id, cluster_label, tag_profile["tags"]
 
         fallback_by_family = {
@@ -1169,6 +1709,16 @@ class DashboardService:
         fallback_name = (keyword.get("cluster_name") or keyword.get("group_name") or "Khác / chưa rõ").strip()
         fallback_slug = normalize_label(fallback_name).replace(" ", "_") or "other"
         return f"fallback__{fallback_slug}", fallback_name, tag_profile["tags"]
+
+    def _filter_tags_for_scenario(self, tags: list[str], filter_prefixes: list[str]) -> list[str]:
+        if not filter_prefixes:
+            return tags
+        filtered = [
+            tag
+            for tag in tags
+            if any(tag.startswith(prefix) for prefix in filter_prefixes)
+        ]
+        return filtered or tags[:1]
 
     def _cluster_keyword_row(
         self,
@@ -1263,10 +1813,12 @@ class DashboardService:
         status_filter: str,
         tag_filter: str,
         sort_by: str,
-        sub_cluster_mode: str,
+        active_scenario_id: str | None,
+        legacy_mode: str | None = None,
         custom_config: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         keywords = self._load_keywords_with_history(project_id)
+        dates = self.get_project_dates(project_id)
         groups = sorted({(keyword.get("group_name") or "Chưa phân nhóm") for keyword in keywords})
         selected_group = selected_group or (groups[0] if groups else None)
         group_keywords = [
@@ -1279,11 +1831,38 @@ class DashboardService:
             int(keyword["id"]): self._keyword_tag_profile(keyword, dataset_topic_tags)
             for keyword in group_keywords
         }
-        mode_meta = self._resolve_sub_cluster_mode(
-            sub_cluster_mode,
-            tag_profiles,
-            custom_config=custom_config,
+        scenarios = self._build_view_scenarios(selected_group, tag_profiles)
+        active_scenario = self._resolve_active_scenario(
+            scenarios,
+            active_scenario_id,
+            legacy_mode=legacy_mode,
         )
+        if active_scenario is None:
+            return {
+                "project_id": str(project_id),
+                "project_name": self.get_project(project_id)["name"],
+                "main_cluster": selected_group,
+                "active_scenario_id": None,
+                "scenarios": [],
+                "insight_note_global": "Chưa đủ dữ liệu để dựng sub-cluster cho bộ lọc hiện tại.",
+                "dates": dates,
+                "current_date": current_date,
+                "baseline_date": baseline_date,
+                "selected_main_cluster": selected_group,
+                "main_clusters": groups,
+                "available_tags": [],
+                "cluster_overview": {
+                    "main_cluster": selected_group,
+                    "total_keywords": 0,
+                    "total_volume": 0,
+                    "generated_at": now_iso(),
+                },
+                "cluster_list": [],
+                "trend_panel": None,
+                "drilldown_tables": [],
+                **self._latest_share_links(project_id),
+                "client_view_password": None,
+            }
         relevant_rows = []
         for keyword in group_keywords:
             row = self._cluster_keyword_row(
@@ -1291,10 +1870,15 @@ class DashboardService:
                 tag_profiles[int(keyword["id"])],
                 current_date,
                 baseline_date,
-                mode_meta,
+                active_scenario,
             )
             if row is None:
                 continue
+            visible_raw_tags = self._filter_tags_for_scenario(
+                row["tags"],
+                active_scenario.get("filter_prefixes", []),
+            )
+            row["visible_tags"] = [self._tag_label(tag) for tag in visible_raw_tags]
             relevant_rows.append(row)
 
         cluster_map: dict[str, dict[str, Any]] = {}
@@ -1304,7 +1888,7 @@ class DashboardService:
                 {
                     "cluster_id": row["cluster_id"],
                     "cluster_name": row["cluster_name"],
-                    "tags": sorted(set(row["tags"])),
+                    "tags": sorted(set(row["visible_tags"])),
                     "keywords": [],
                     "current_ranks": [],
                     "previous_ranks": [],
@@ -1315,12 +1899,11 @@ class DashboardService:
             cluster["current_ranks"].append(row["current_rank"])
             if row["previous_rank"] is not None:
                 cluster["previous_ranks"].append(row["previous_rank"])
-            if row["volume"]:
+            if row["volume"] is not None:
                 cluster["volumes"].append(float(row["volume"]))
-            cluster["tags"] = sorted(set(cluster["tags"]) | set(row["tags"]))
+            cluster["tags"] = sorted(set(cluster["tags"]) | set(row["visible_tags"]))
 
         max_total_volume = max((sum(cluster["volumes"]) for cluster in cluster_map.values()), default=1.0)
-        dates = self.get_project_dates(project_id)
         recent_dates = dates[-30:] if len(dates) > 30 else dates
         cluster_list: list[dict[str, Any]] = []
         drilldown_tables: list[dict[str, Any]] = []
@@ -1364,7 +1947,7 @@ class DashboardService:
             top_keywords = [
                 {
                     "keyword": item["keyword"],
-                    "tags": item["tags"],
+                    "tags": item["visible_tags"],
                     "volume": item["volume"],
                     "current_rank": item["current_rank"],
                     "previous_rank": item["previous_rank"],
@@ -1417,7 +2000,7 @@ class DashboardService:
                     [
                         {
                             "keyword": item["keyword"],
-                            "tags": item["tags"],
+                            "tags": item["visible_tags"],
                             "volume": item["volume"],
                             "current_rank": item["current_rank"],
                             "previous_rank": item["previous_rank"],
@@ -1468,14 +2051,22 @@ class DashboardService:
             "insight_note": selected_cluster["insight_note"] if selected_cluster else "Chưa có cụm phù hợp với bộ lọc hiện tại.",
         }
         total_volume = sum(item["volume"] for item in relevant_rows)
+        share_links = self._latest_share_links(project_id)
         return {
+            "project_id": str(project_id),
+            "project_name": self.get_project(project_id)["name"],
             "main_cluster": selected_group,
-            "sub_cluster_mode": mode_meta["requested_mode"],
-            "resolved_sub_cluster_mode": mode_meta["resolved_mode"],
-            "resolved_primary_tag_prefix": mode_meta["primary_family"],
-            "resolved_secondary_tag_prefix": mode_meta.get("secondary_family"),
-            "insight_note_global": mode_meta["note"],
-            "clustering_mode": mode_meta["requested_mode"],
+            "active_scenario_id": active_scenario["scenario_id"],
+            "scenarios": [
+                {
+                    "scenario_id": scenario["scenario_id"],
+                    "scenario_label": scenario["scenario_label"],
+                    "scenario_description": scenario["scenario_description"],
+                    "visible_tag_types": scenario["visible_tag_types"],
+                }
+                for scenario in scenarios
+            ],
+            "insight_note_global": active_scenario["scenario_description"],
             "dates": dates,
             "current_date": current_date,
             "baseline_date": baseline_date,
@@ -1491,6 +2082,8 @@ class DashboardService:
             "cluster_list": cluster_list,
             "trend_panel": trend_panel,
             "drilldown_tables": drilldown_tables,
+            **share_links,
+            "client_view_password": None,
         }
 
     def get_overview(self, project_id: int) -> dict[str, Any]:
@@ -1636,20 +2229,19 @@ class DashboardService:
         main_cluster: str | None = None,
         tag_filter: str = "all",
         sort_by: str = "health_score",
-        sub_cluster_mode: str = "auto",
+        active_scenario_id: str | None = None,
+        legacy_mode: str | None = None,
         custom_config: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         dates = self.get_project_dates(project_id)
-        normalized_mode = self._normalize_sub_cluster_mode(sub_cluster_mode)
         if not dates:
             return {
+                "project_id": str(project_id),
+                "project_name": self.get_project(project_id)["name"],
                 "main_cluster": None,
-                "sub_cluster_mode": normalized_mode,
-                "resolved_sub_cluster_mode": normalized_mode,
-                "resolved_primary_tag_prefix": None,
-                "resolved_secondary_tag_prefix": None,
+                "active_scenario_id": None,
+                "scenarios": [],
                 "insight_note_global": "Chưa có dữ liệu để sinh sub-cluster.",
-                "clustering_mode": normalized_mode,
                 "dates": [],
                 "current_date": None,
                 "baseline_date": None,
@@ -1660,6 +2252,8 @@ class DashboardService:
                 "cluster_list": [],
                 "trend_panel": None,
                 "drilldown_tables": [],
+                **self._latest_share_links(project_id),
+                "client_view_password": None,
             }
         current_date = current_date or dates[-1]
         baseline_date = baseline_date or (dates[-2] if len(dates) >= 2 else dates[0])
@@ -1671,7 +2265,8 @@ class DashboardService:
             status_filter=status_filter,
             tag_filter=tag_filter,
             sort_by=sort_by,
-            sub_cluster_mode=sub_cluster_mode,
+            active_scenario_id=active_scenario_id,
+            legacy_mode=legacy_mode,
             custom_config=custom_config,
         )
 

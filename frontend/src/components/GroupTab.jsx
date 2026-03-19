@@ -54,7 +54,7 @@ function currentRankLabel(value) {
   return `Top ${Math.round(value)}`;
 }
 
-export default function GroupTab({ data, filters, setFilters, mode }) {
+export default function GroupTab({ data, filters, setFilters, mode, controlsMode = "full" }) {
   const [selectedClusterId, setSelectedClusterId] = useState("");
   const [expandedClusterId, setExpandedClusterId] = useState("");
   const [expandedSize, setExpandedSize] = useState({});
@@ -64,10 +64,10 @@ export default function GroupTab({ data, filters, setFilters, mode }) {
     if (!filters.main_cluster && data.selected_main_cluster) {
       setFilters((previous) => ({ ...previous, main_cluster: data.selected_main_cluster }));
     }
-    if (!filters.sub_cluster_mode && data.sub_cluster_mode) {
-      setFilters((previous) => ({ ...previous, sub_cluster_mode: data.sub_cluster_mode }));
+    if (!filters.active_scenario_id && data.active_scenario_id) {
+      setFilters((previous) => ({ ...previous, active_scenario_id: data.active_scenario_id }));
     }
-  }, [data, filters.main_cluster, filters.sub_cluster_mode, setFilters]);
+  }, [data, filters.main_cluster, filters.active_scenario_id, setFilters]);
 
   useEffect(() => {
     const defaultClusterId = data?.trend_panel?.selected_cluster_id || data?.cluster_list?.[0]?.cluster_id || "";
@@ -94,6 +94,10 @@ export default function GroupTab({ data, filters, setFilters, mode }) {
   const selectedCluster =
     data.cluster_list.find((item) => item.cluster_id === selectedClusterId) ||
     data.cluster_list[0];
+  const selectedScenario =
+    data.scenarios?.find((item) => item.scenario_id === data.active_scenario_id) ||
+    data.scenarios?.[0] ||
+    null;
   const selectedDrilldown =
     data.drilldown_tables.find((item) => item.cluster_id === selectedCluster?.cluster_id) || null;
   const visibleKeywords = selectedDrilldown
@@ -110,120 +114,131 @@ export default function GroupTab({ data, filters, setFilters, mode }) {
       <div className="panel-grid">
         <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
           <div>
-            <p className="text-sm font-semibold text-white">Chế độ sub-cluster</p>
+            <p className="text-sm font-semibold text-white">Đổi góc nhìn sub-cluster</p>
             <p className="mt-1 text-sm text-slate-400">
-              Cùng một tập keyword, cùng một engine tag, nhưng đổi góc nhìn gom cụm theo nền tảng, loại sản phẩm hoặc nhu cầu.
+              Engine tự suy ra 2-3 kịch bản gom cụm từ chính dataset này. Bạn chỉ đổi view, còn tập keyword và dữ liệu gốc vẫn giữ nguyên.
             </p>
           </div>
           <div className="flex flex-wrap gap-2 rounded-full border border-white/10 bg-white/[0.03] p-1">
-            {[
-              ["auto", "Auto"],
-              ["platform_first", "Platform"],
-              ["product_first", "Product"],
-              ["intent_first", "Intent"],
-            ].map(([value, label]) => (
+            {(data.scenarios || []).map((scenario) => (
               <button
-                key={value}
-                className={`rounded-full px-4 py-2 text-sm font-semibold transition ${filters.sub_cluster_mode === value ? "bg-neon-cyan text-slate-950" : "text-slate-300"}`}
+                key={scenario.scenario_id}
+                className={`rounded-full px-4 py-2 text-sm font-semibold transition ${filters.active_scenario_id === scenario.scenario_id ? "bg-neon-cyan text-slate-950" : "text-slate-300"}`}
                 type="button"
-                onClick={() => setFilters({ ...filters, sub_cluster_mode: value })}
+                onClick={() => setFilters({ ...filters, active_scenario_id: scenario.scenario_id })}
               >
-                {label}
+                {scenario.scenario_label}
               </button>
             ))}
           </div>
         </div>
         <div className="mt-4 rounded-[24px] border border-neon-cyan/18 bg-neon-cyan/6 px-4 py-4 text-sm leading-7 text-slate-300">
-          <p className="font-semibold text-white">Gợi ý từ engine sub-cluster</p>
+          <p className="font-semibold text-white">Kịch bản đang xem</p>
+          {selectedScenario ? (
+            <p className="mt-2 font-medium text-white">{selectedScenario.scenario_label}</p>
+          ) : null}
           <p className="mt-2">
             {data.insight_note_global || "Engine đang phân tích phân bố tag để gom cụm phù hợp nhất cho bộ dữ liệu này."}
           </p>
-          <p className="mt-2 text-xs uppercase tracking-[0.25em] text-slate-500">
-            Đang hiển thị: {data.sub_cluster_mode} · Quy về: {data.resolved_sub_cluster_mode}
-          </p>
+          {selectedScenario?.scenario_description ? (
+            <p className="mt-2 text-xs uppercase tracking-[0.18em] text-slate-500">
+              {selectedScenario.scenario_description}
+            </p>
+          ) : null}
         </div>
       </div>
 
-      <div className="panel-grid">
-        <div className="grid gap-3 xl:grid-cols-6">
-          <label className="text-sm font-semibold text-white">
-            Ngày hiện tại
-            <select
-              className="input-dark mt-2"
-              value={filters.current_date || data.current_date || ""}
-              onChange={(event) => setFilters({ ...filters, current_date: event.target.value })}
-            >
-              {data.dates.map((item) => (
-                <option key={item} value={item}>
-                  {item}
-                </option>
-              ))}
-            </select>
-          </label>
+      {controlsMode === "full" ? (
+        <div className="panel-grid">
+          <div className="grid gap-3 xl:grid-cols-6">
+            <label className="text-sm font-semibold text-white">
+              Ngày hiện tại
+              <select
+                className="input-dark mt-2"
+                value={filters.current_date || data.current_date || ""}
+                onChange={(event) => setFilters({ ...filters, current_date: event.target.value })}
+              >
+                {data.dates.map((item) => (
+                  <option key={item} value={item}>
+                    {item}
+                  </option>
+                ))}
+              </select>
+            </label>
 
-          <label className="text-sm font-semibold text-white">
-            So sánh với ngày
-            <select
-              className="input-dark mt-2"
-              value={filters.baseline_date || data.baseline_date || ""}
-              onChange={(event) => setFilters({ ...filters, baseline_date: event.target.value })}
-            >
-              {data.dates.map((item) => (
-                <option key={item} value={item}>
-                  {item}
-                </option>
-              ))}
-            </select>
-          </label>
+            <label className="text-sm font-semibold text-white">
+              So sánh với ngày
+              <select
+                className="input-dark mt-2"
+                value={filters.baseline_date || data.baseline_date || ""}
+                onChange={(event) => setFilters({ ...filters, baseline_date: event.target.value })}
+              >
+                {data.dates.map((item) => (
+                  <option key={item} value={item}>
+                    {item}
+                  </option>
+                ))}
+              </select>
+            </label>
 
-          <label className="text-sm font-semibold text-white">
-            Bộ chính
-            <select
-              className="input-dark mt-2"
-              value={filters.main_cluster || data.selected_main_cluster || ""}
-              onChange={(event) => setFilters({ ...filters, main_cluster: event.target.value })}
-            >
-              {data.main_clusters.map((item) => (
-                <option key={item} value={item}>
-                  {item}
-                </option>
-              ))}
-            </select>
-          </label>
+            <label className="text-sm font-semibold text-white">
+              Bộ chính
+              <select
+                className="input-dark mt-2"
+                value={filters.main_cluster || data.selected_main_cluster || ""}
+                onChange={(event) => setFilters({ ...filters, main_cluster: event.target.value })}
+              >
+                {data.main_clusters.map((item) => (
+                  <option key={item} value={item}>
+                    {item}
+                  </option>
+                ))}
+              </select>
+            </label>
 
-          <label className="text-sm font-semibold text-white">
-            Lọc tag
-            <select className="input-dark mt-2" value={filters.tag || "all"} onChange={(event) => setFilters({ ...filters, tag: event.target.value })}>
-              <option value="all">Tất cả tag</option>
-              {data.available_tags.map((tag) => (
-                <option key={tag} value={tag}>
-                  {tag}
-                </option>
-              ))}
-            </select>
-          </label>
+            <label className="text-sm font-semibold text-white">
+              Lọc tag
+              <select className="input-dark mt-2" value={filters.tag || "all"} onChange={(event) => setFilters({ ...filters, tag: event.target.value })}>
+                <option value="all">Tất cả tag</option>
+                {data.available_tags.map((tag) => (
+                  <option key={tag} value={tag}>
+                    {tag}
+                  </option>
+                ))}
+              </select>
+            </label>
 
-          <label className="text-sm font-semibold text-white">
-            Xu hướng
-            <select className="input-dark mt-2" value={filters.status || "all"} onChange={(event) => setFilters({ ...filters, status: event.target.value })}>
-              <option value="all">Tất cả</option>
-              <option value="rising">Đang tăng</option>
-              <option value="stable">Ổn định</option>
-              <option value="declining">Đang giảm</option>
-            </select>
-          </label>
+            <label className="text-sm font-semibold text-white">
+              Xu hướng
+              <select className="input-dark mt-2" value={filters.status || "all"} onChange={(event) => setFilters({ ...filters, status: event.target.value })}>
+                <option value="all">Tất cả</option>
+                <option value="rising">Đang tăng</option>
+                <option value="stable">Ổn định</option>
+                <option value="declining">Đang giảm</option>
+              </select>
+            </label>
 
-          <label className="text-sm font-semibold text-white">
-            Sắp xếp
-            <select className="input-dark mt-2" value={filters.sort_by || "health_score"} onChange={(event) => setFilters({ ...filters, sort_by: event.target.value })}>
-              <option value="health_score">Điểm khỏe</option>
-              <option value="trend_strength">Độ mạnh xu hướng</option>
-              <option value="total_volume">Tổng volume</option>
-              <option value="avg_rank">Hạng trung bình</option>
-            </select>
-          </label>
+            <label className="text-sm font-semibold text-white">
+              Sắp xếp
+              <select className="input-dark mt-2" value={filters.sort_by || "health_score"} onChange={(event) => setFilters({ ...filters, sort_by: event.target.value })}>
+                <option value="health_score">Điểm khỏe</option>
+                <option value="trend_strength">Độ mạnh xu hướng</option>
+                <option value="total_volume">Tổng volume</option>
+                <option value="avg_rank">Hạng trung bình</option>
+              </select>
+            </label>
+          </div>
         </div>
-      </div>
+      ) : (
+        <div className="panel-grid">
+          <div className="flex flex-wrap gap-2">
+            <span className="chip">Ngày hiện tại {formatDateLabel(data.current_date)}</span>
+            <span className="chip">Mốc đối chiếu {formatDateLabel(data.baseline_date)}</span>
+            <span className="chip">{data.selected_main_cluster || data.cluster_overview?.main_cluster}</span>
+            <span className="chip">{data.cluster_overview?.total_keywords || 0} keyword</span>
+          </div>
+        </div>
+      )}
 
       <div className="grid gap-6 xl:grid-cols-[1.65fr,0.95fr]">
         <section className="panel-grid">
@@ -272,7 +287,7 @@ export default function GroupTab({ data, filters, setFilters, mode }) {
                         <div className="mt-3 flex flex-wrap gap-2">
                           {cluster.tags.map((tag) => (
                             <span key={`${cluster.cluster_id}-${tag}`} className="chip">
-                              #{tag}
+                              {tag}
                             </span>
                           ))}
                         </div>

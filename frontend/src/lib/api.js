@@ -59,6 +59,15 @@ async function request(path, { token, method = "GET", body, isForm = false } = {
   return response.blob();
 }
 
+function buildQuery(params = {}) {
+  const query = new URLSearchParams();
+  Object.entries(params).forEach(([key, value]) => {
+    if (value === undefined || value === null || value === "") return;
+    query.set(key, String(value));
+  });
+  return query;
+}
+
 export function login(password) {
   return request("/api/auth/login", {
     method: "POST",
@@ -110,12 +119,12 @@ export function getOverview(token, projectId) {
 }
 
 export function getGroupView(token, projectId, params) {
-  const query = new URLSearchParams(params);
+  const query = buildQuery(params);
   return request(`/api/projects/${projectId}/groups?${query.toString()}`, { token });
 }
 
 export function getKeywordTable(token, projectId, params) {
-  const query = new URLSearchParams(params);
+  const query = buildQuery(params);
   return request(`/api/projects/${projectId}/keywords?${query.toString()}`, { token });
 }
 
@@ -150,6 +159,14 @@ export function updateSettings(token, projectId, payload) {
   });
 }
 
+export function saveProjectViewState(token, projectId, payload) {
+  return request(`/api/projects/${projectId}/view-state`, {
+    token,
+    method: "POST",
+    body: payload,
+  });
+}
+
 export function reclusterProject(token, projectId) {
   return request(`/api/projects/${projectId}/recluster`, { token, method: "POST" });
 }
@@ -174,6 +191,22 @@ export function createClusterInsight(token, projectId, clusterName) {
   });
 }
 
+export function createClientViewShare(token, projectId, payload) {
+  return request(`/api/projects/${projectId}/shares/client-view`, {
+    token,
+    method: "POST",
+    body: payload,
+  });
+}
+
+export function createReportSnapshotShare(token, projectId, payload) {
+  return request(`/api/projects/${projectId}/shares/report-snapshot`, {
+    token,
+    method: "POST",
+    body: payload,
+  });
+}
+
 export function getEvents(token, projectId) {
   return request(`/api/projects/${projectId}/events`, { token });
 }
@@ -187,7 +220,7 @@ export function createEvent(token, projectId, payload) {
 }
 
 export async function exportKeywords(token, projectId, params) {
-  const query = new URLSearchParams(params);
+  const query = buildQuery(params);
   const blob = await request(`/api/projects/${projectId}/export?${query.toString()}`, { token });
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
@@ -195,4 +228,17 @@ export async function exportKeywords(token, projectId, params) {
   anchor.download = "seo-keywords.xlsx";
   anchor.click();
   URL.revokeObjectURL(url);
+}
+
+export function getPublicShare(shareToken, params = {}, token = "") {
+  const query = buildQuery(params);
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return request(`/api/public/${shareToken}${suffix}`, { token });
+}
+
+export function loginPublicShare(shareToken, password) {
+  return request(`/api/public/${shareToken}/login`, {
+    method: "POST",
+    body: { password },
+  });
 }

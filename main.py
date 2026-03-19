@@ -8,7 +8,7 @@ from typing import Any
 
 from fastapi import Body, Depends, FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 
@@ -166,6 +166,7 @@ def group_view(
     main_cluster: str | None = Query(default=None),
     tag: str = Query(default="all"),
     sort_by: str = Query(default="health_score"),
+    active_scenario_id: str | None = Query(default=None),
     sub_cluster_mode: str | None = Query(default=None),
     clustering_mode: str | None = Query(default=None),
     custom_primary_tag_prefix: str | None = Query(default=None),
@@ -186,7 +187,8 @@ def group_view(
         main_cluster=main_cluster,
         tag_filter=tag,
         sort_by=sort_by,
-        sub_cluster_mode=sub_cluster_mode or clustering_mode or "auto",
+        active_scenario_id=active_scenario_id,
+        legacy_mode=sub_cluster_mode or clustering_mode or "auto",
         custom_config=custom_config,
     )
 
@@ -261,6 +263,15 @@ def update_settings(
     return service.update_project_settings(project_id, payload)
 
 
+@app.post("/api/projects/{project_id}/view-state")
+def save_view_state(
+    project_id: int,
+    payload: dict[str, Any] = Body(default={}),
+    _: dict[str, Any] = Depends(require_auth),
+) -> dict[str, Any]:
+    return service.update_project_view_state(project_id, payload)
+
+
 @app.post("/api/projects/{project_id}/recluster")
 def recluster(project_id: int, _: dict[str, Any] = Depends(require_auth)) -> dict[str, Any]:
     return service.recluster_keywords(project_id)
@@ -290,6 +301,46 @@ def cluster_insight(
     if not cluster_name:
         raise HTTPException(status_code=400, detail="Thiếu tên cụm.")
     return service.generate_cluster_pattern_insight(project_id, cluster_name)
+
+
+@app.post("/api/projects/{project_id}/shares/client-view")
+def create_client_view(
+    project_id: int,
+    payload: dict[str, Any] = Body(default={}),
+    _: dict[str, Any] = Depends(require_auth),
+) -> dict[str, Any]:
+    return service.create_client_view_share(project_id, payload)
+
+
+@app.post("/api/projects/{project_id}/shares/report-snapshot")
+def create_report_snapshot(
+    project_id: int,
+    payload: dict[str, Any] = Body(default={}),
+    _: dict[str, Any] = Depends(require_auth),
+) -> dict[str, Any]:
+    return service.create_report_snapshot_share(project_id, payload)
+
+
+@app.post("/api/public/{share_token}/login")
+def public_share_login(
+    share_token: str,
+    payload: dict[str, Any] = Body(default={}),
+) -> dict[str, Any]:
+    password = str(payload.get("password") or "")
+    return service.login_public_share(share_token, password)
+
+
+@app.get("/api/public/{share_token}")
+def public_share_payload(
+    share_token: str,
+    active_scenario_id: str | None = Query(default=None),
+    credentials: HTTPAuthorizationCredentials | None = Depends(security),
+) -> dict[str, Any]:
+    return service.get_public_share_payload(
+        share_token,
+        public_token=credentials.credentials if credentials else None,
+        active_scenario_id=active_scenario_id,
+    )
 
 
 @app.get("/api/projects/{project_id}/events")
@@ -359,6 +410,17 @@ def export_keywords(
 @app.exception_handler(ValueError)
 def value_error_handler(_: Any, exc: ValueError) -> JSONResponse:
     return JSONResponse({"detail": str(exc)}, status_code=400)
+
+
+if FRONTEND_DIST.exists():
+    @app.get("/client/{share_token}")
+    def client_view_page(share_token: str) -> FileResponse:
+        return FileResponse(FRONTEND_DIST / "index.html")
+
+
+    @app.get("/report/{share_token}")
+    def report_view_page(share_token: str) -> FileResponse:
+        return FileResponse(FRONTEND_DIST / "index.html")
 
 
 if FRONTEND_DIST.exists():

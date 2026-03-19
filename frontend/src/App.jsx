@@ -4,11 +4,15 @@ import KeywordDrawer from "./components/KeywordDrawer";
 import KeywordTableTab from "./components/KeywordTableTab";
 import LoginView from "./components/LoginView";
 import OverviewTab from "./components/OverviewTab";
+import PublicShareView from "./components/PublicShareView";
+import SharePanel from "./components/SharePanel";
 import SettingsPanel from "./components/SettingsPanel";
 import {
   clearSession,
+  createClientViewShare,
   createEvent,
   createProject,
+  createReportSnapshotShare,
   createWeeklyInsight,
   exportKeywords,
   generateKeywordInsight,
@@ -22,6 +26,7 @@ import {
   login,
   reclusterProject,
   refreshProject,
+  saveProjectViewState,
   saveKeywordNotes,
   saveWeeklyNote,
   storeSession,
@@ -41,6 +46,11 @@ const tabs = [
 ];
 
 export default function App() {
+  const publicShareMatch = window.location.pathname.match(/^\/(client|report)\/([^/]+)$/);
+  if (publicShareMatch) {
+    return <PublicShareView shareType={publicShareMatch[1]} shareToken={publicShareMatch[2]} />;
+  }
+
   const [token, setToken] = useState("");
   const [authChecked, setAuthChecked] = useState(false);
   const [password, setPassword] = useState("");
@@ -75,6 +85,14 @@ export default function App() {
   const [insightLoading, setInsightLoading] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [reclustering, setReclustering] = useState(false);
+  const [creatingClientView, setCreatingClientView] = useState(false);
+  const [creatingReportSnapshot, setCreatingReportSnapshot] = useState(false);
+  const [viewStateReady, setViewStateReady] = useState(false);
+  const [shareResult, setShareResult] = useState({
+    client_view_url: "",
+    client_view_password: "",
+    report_snapshot_url: "",
+  });
 
   const [manualEvent, setManualEvent] = useState({
     event_date: "",
@@ -88,7 +106,7 @@ export default function App() {
     main_cluster: "",
     tag: "all",
     sort_by: "health_score",
-    sub_cluster_mode: "auto",
+    active_scenario_id: "",
   });
   const [keywordFilters, setKeywordFilters] = useState({
     current_date: "",
@@ -134,7 +152,13 @@ export default function App() {
 
   useEffect(() => {
     if (!selectedProjectId || !token) return;
-    loadOverviewAndSettings(selectedProjectId);
+    setViewStateReady(false);
+    setShareResult({
+      client_view_url: "",
+      client_view_password: "",
+      report_snapshot_url: "",
+    });
+    loadOverviewAndSettings(selectedProjectId, { preserveExisting: false });
   }, [selectedProjectId, token]);
 
   useEffect(() => {
@@ -142,7 +166,7 @@ export default function App() {
     getGroupView(token, selectedProjectId, groupFilters)
       .then(setGroupView)
       .catch((error) => setToast({ type: "error", message: error.message }));
-  }, [selectedProjectId, token, groupFilters.current_date, groupFilters.baseline_date, groupFilters.status, groupFilters.main_cluster, groupFilters.tag, groupFilters.sort_by, groupFilters.sub_cluster_mode]);
+  }, [selectedProjectId, token, groupFilters.current_date, groupFilters.baseline_date, groupFilters.status, groupFilters.main_cluster, groupFilters.tag, groupFilters.sort_by, groupFilters.active_scenario_id]);
 
   useEffect(() => {
     if (!selectedProjectId || !token || !keywordFilters.current_date) return;
@@ -173,6 +197,42 @@ export default function App() {
     return () => window.clearTimeout(timer);
   }, [toast]);
 
+  useEffect(() => {
+    if (!selectedProjectId || !token || !viewStateReady) return;
+    const timer = window.setTimeout(() => {
+      saveProjectViewState(token, selectedProjectId, {
+        mode,
+        active_tab: activeTab,
+        group_filters: groupFilters,
+        keyword_filters: keywordFilters,
+      }).catch(() => {});
+    }, 500);
+    return () => window.clearTimeout(timer);
+  }, [
+    selectedProjectId,
+    token,
+    viewStateReady,
+    mode,
+    activeTab,
+    groupFilters.current_date,
+    groupFilters.baseline_date,
+    groupFilters.status,
+    groupFilters.main_cluster,
+    groupFilters.tag,
+    groupFilters.sort_by,
+    groupFilters.active_scenario_id,
+    keywordFilters.current_date,
+    keywordFilters.search,
+    keywordFilters.groups,
+    keywordFilters.clusters,
+    keywordFilters.status,
+    keywordFilters.vol_min,
+    keywordFilters.vol_max,
+    keywordFilters.rank_min,
+    keywordFilters.rank_max,
+    keywordFilters.movers_only,
+  ]);
+
   async function loadProjectsList(preferredProjectId) {
     try {
       const response = await getProjects(token);
@@ -186,6 +246,7 @@ export default function App() {
         setSelectedProjectId(String(nextProjectId));
         localStorage.setItem("seo-dashboard-project-id", String(nextProjectId));
       } else {
+        setViewStateReady(false);
         setSelectedProjectId("");
         setOverview(null);
         setGroupView(null);
@@ -197,7 +258,7 @@ export default function App() {
     }
   }
 
-  async function loadOverviewAndSettings(projectId) {
+  async function loadOverviewAndSettings(projectId, { preserveExisting = true } = {}) {
     setPageLoading(true);
     try {
       const [overviewResponse, settingsResponse] = await Promise.all([
@@ -206,24 +267,63 @@ export default function App() {
       ]);
       setOverview(overviewResponse);
       setSettings(settingsResponse);
+      const savedState = settingsResponse?.project?.saved_view_state || overviewResponse?.project?.saved_view_state || {};
+      const savedGroupFilters = savedState.group_filters || {};
+      const savedKeywordFilters = savedState.keyword_filters || {};
+      if (!preserveExisting) {
+        const nextMode = savedState.mode === CLIENT_MODE ? CLIENT_MODE : TEAM_MODE;
+        setMode(nextMode);
+        const nextTab = savedState.active_tab || "overview";
+        setActiveTab(nextMode === CLIENT_MODE && nextTab === "keywords" ? "overview" : nextTab);
+      }
       const dates = overviewResponse.dates || [];
       if (dates.length) {
         const current = dates[dates.length - 1];
         const baseline = dates[dates.length - 2] || dates[0];
+        const resolvedCurrentGroupDate =
+          (preserveExisting && groupFilters.current_date && dates.includes(groupFilters.current_date) && groupFilters.current_date) ||
+          (savedGroupFilters.current_date && dates.includes(savedGroupFilters.current_date) && savedGroupFilters.current_date) ||
+          current;
+        const resolvedBaselineGroupDate =
+          (preserveExisting && groupFilters.baseline_date && dates.includes(groupFilters.baseline_date) && groupFilters.baseline_date) ||
+          (savedGroupFilters.baseline_date && dates.includes(savedGroupFilters.baseline_date) && savedGroupFilters.baseline_date) ||
+          baseline;
         const nextGroupFilters = {
-          ...groupFilters,
-          current_date: current,
-          baseline_date: baseline,
+          current_date: resolvedCurrentGroupDate,
+          baseline_date: resolvedBaselineGroupDate,
+          status: (preserveExisting ? groupFilters.status : "") || savedGroupFilters.status || "all",
+          main_cluster: (preserveExisting ? groupFilters.main_cluster : "") || savedGroupFilters.main_cluster || "",
+          tag: (preserveExisting ? groupFilters.tag : "") || savedGroupFilters.tag || "all",
+          sort_by: (preserveExisting ? groupFilters.sort_by : "") || savedGroupFilters.sort_by || "health_score",
+          active_scenario_id:
+            (preserveExisting ? groupFilters.active_scenario_id : "") ||
+            savedGroupFilters.active_scenario_id ||
+            "",
         };
+        const resolvedCurrentKeywordDate =
+          (preserveExisting && keywordFilters.current_date && dates.includes(keywordFilters.current_date) && keywordFilters.current_date) ||
+          (savedKeywordFilters.current_date && dates.includes(savedKeywordFilters.current_date) && savedKeywordFilters.current_date) ||
+          current;
         const nextKeywordFilters = {
-          ...keywordFilters,
-          current_date: current,
+          current_date: resolvedCurrentKeywordDate,
+          search: (preserveExisting ? keywordFilters.search : "") || savedKeywordFilters.search || "",
+          groups: (preserveExisting ? keywordFilters.groups : "") || savedKeywordFilters.groups || "",
+          clusters: (preserveExisting ? keywordFilters.clusters : "") || savedKeywordFilters.clusters || "",
+          status: (preserveExisting ? keywordFilters.status : "") || savedKeywordFilters.status || "all",
+          vol_min: (preserveExisting ? keywordFilters.vol_min : undefined) ?? savedKeywordFilters.vol_min ?? 0,
+          vol_max: (preserveExisting ? keywordFilters.vol_max : undefined) ?? savedKeywordFilters.vol_max ?? 1000000,
+          rank_min: (preserveExisting ? keywordFilters.rank_min : undefined) ?? savedKeywordFilters.rank_min ?? 0,
+          rank_max: (preserveExisting ? keywordFilters.rank_max : undefined) ?? savedKeywordFilters.rank_max ?? 101,
+          movers_only:
+            (preserveExisting ? keywordFilters.movers_only : undefined) ??
+            savedKeywordFilters.movers_only ??
+            false,
         };
         setGroupFilters(nextGroupFilters);
         setKeywordFilters(nextKeywordFilters);
         setManualEvent((previous) => ({
           ...previous,
-          event_date: current,
+          event_date: resolvedCurrentGroupDate,
         }));
         const [groupsResponse, keywordResponse] = await Promise.all([
           getGroupView(token, projectId, nextGroupFilters),
@@ -241,6 +341,7 @@ export default function App() {
     } catch (error) {
       setToast({ type: "error", message: error.message });
     } finally {
+      setViewStateReady(true);
       setPageLoading(false);
     }
   }
@@ -301,17 +402,10 @@ export default function App() {
         message: `Đã nhập ${response.imported_keywords} keyword và ${response.imported_rankings} bản ghi ranking.`,
       });
       await loadOverviewAndSettings(selectedProjectId);
-      const [groupsResponse, keywordsResponse] = await Promise.all([
-        getGroupView(token, selectedProjectId, groupFilters),
-        getKeywordTable(token, selectedProjectId, keywordFilters),
-      ]);
-      setGroupView(groupsResponse);
-      setKeywordTable(keywordsResponse);
     } catch (error) {
       setToast({ type: "error", message: error.message });
     } finally {
       setUploading(false);
-      setSettingsOpen(false);
     }
   }
 
@@ -477,6 +571,61 @@ export default function App() {
     }
   }
 
+  async function handleCreateClientViewShare(form) {
+    if (!selectedProjectId) return;
+    setCreatingClientView(true);
+    try {
+      const response = await createClientViewShare(token, selectedProjectId, {
+        ...form,
+        state: {
+          mode,
+          active_tab: activeTab,
+          group_filters: groupFilters,
+          keyword_filters: keywordFilters,
+        },
+      });
+      setShareResult((previous) => ({
+        ...previous,
+        client_view_url: response.client_view_url || previous.client_view_url,
+        client_view_password: response.client_view_password || "",
+      }));
+      setToast({ type: "success", message: "Đã tạo link khách hàng." });
+      const refreshedGroupView = await getGroupView(token, selectedProjectId, groupFilters);
+      setGroupView(refreshedGroupView);
+    } catch (error) {
+      setToast({ type: "error", message: error.message });
+    } finally {
+      setCreatingClientView(false);
+    }
+  }
+
+  async function handleCreateReportSnapshot(form) {
+    if (!selectedProjectId) return;
+    setCreatingReportSnapshot(true);
+    try {
+      const response = await createReportSnapshotShare(token, selectedProjectId, {
+        ...form,
+        state: {
+          mode,
+          active_tab: activeTab,
+          group_filters: groupFilters,
+          keyword_filters: keywordFilters,
+        },
+      });
+      setShareResult((previous) => ({
+        ...previous,
+        report_snapshot_url: response.report_snapshot_url || previous.report_snapshot_url,
+      }));
+      setToast({ type: "success", message: "Đã đóng băng report snapshot." });
+      const refreshedGroupView = await getGroupView(token, selectedProjectId, groupFilters);
+      setGroupView(refreshedGroupView);
+    } catch (error) {
+      setToast({ type: "error", message: error.message });
+    } finally {
+      setCreatingReportSnapshot(false);
+    }
+  }
+
   if (!authChecked) {
     return <div className="flex min-h-screen items-center justify-center text-sm text-slate-400">Đang kiểm tra phiên đăng nhập...</div>;
   }
@@ -637,16 +786,26 @@ export default function App() {
             addingEvent={addingEvent}
           />
         ) : activeTab === "groups" ? (
-          <GroupTab
-            token={token}
-            projectId={selectedProjectId}
-            data={groupView}
-            filters={groupFilters}
-            setFilters={setGroupFilters}
-            mode={mode}
-            onInsightCreated={() => loadOverviewAndSettings(selectedProjectId)}
-            setToast={setToast}
-          />
+          <div className="space-y-6">
+            {mode === TEAM_MODE ? (
+              <SharePanel
+                projectName={project?.name || overview?.project?.name || ""}
+                clientViewUrl={shareResult.client_view_url || groupView?.client_view_url || settings?.client_view_url || ""}
+                reportSnapshotUrl={shareResult.report_snapshot_url || groupView?.report_snapshot_url || settings?.report_snapshot_url || ""}
+                latestClientPassword={shareResult.client_view_password || ""}
+                onCreateClientView={handleCreateClientViewShare}
+                onCreateReportSnapshot={handleCreateReportSnapshot}
+                creatingClientView={creatingClientView}
+                creatingReportSnapshot={creatingReportSnapshot}
+              />
+            ) : null}
+            <GroupTab
+              data={groupView}
+              filters={groupFilters}
+              setFilters={setGroupFilters}
+              mode={mode}
+            />
+          </div>
         ) : (
           <KeywordTableTab
             data={keywordTable}
@@ -662,16 +821,16 @@ export default function App() {
 
       <SettingsPanel
         open={settingsOpen}
-            project={project}
-            settings={settings}
-            uploading={uploading}
-            testingSheet={testingSheet}
-            saving={savingSettings}
+        project={project}
+        settings={settings}
+        uploading={uploading}
+        testingSheet={testingSheet}
+        saving={savingSettings}
         dragActive={dragActive}
         setDragActive={setDragActive}
-            onClose={() => setSettingsOpen(false)}
-            onSave={handleSaveSettings}
-            onTestSheet={handleTestSheet}
+        onClose={() => setSettingsOpen(false)}
+        onSave={handleSaveSettings}
+        onTestSheet={handleTestSheet}
         onUpload={handleUpload}
         onCreateProject={handleCreateProject}
         creatingProject={creatingProject}
