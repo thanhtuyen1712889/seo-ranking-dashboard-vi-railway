@@ -51,9 +51,11 @@ def require_auth(credentials: HTTPAuthorizationCredentials | None = Depends(secu
 
 @app.on_event("startup")
 async def startup_event() -> None:
-    app.state.db_init_task = asyncio.create_task(run_init_db_once())
-    app.state.refresh_task = asyncio.create_task(refresh_loop())
-    app.state.bootstrap_task = asyncio.create_task(run_bootstrap_once())
+    app.state.db_init_task = None
+    app.state.refresh_task = None
+    app.state.bootstrap_task = None
+    loop = asyncio.get_running_loop()
+    loop.call_later(1, start_background_jobs)
 
 
 @app.on_event("shutdown")
@@ -73,6 +75,14 @@ async def shutdown_event() -> None:
         bootstrap_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await bootstrap_task
+
+
+def start_background_jobs() -> None:
+    if getattr(app.state, "refresh_task", None):
+        return
+    app.state.db_init_task = asyncio.create_task(run_init_db_once())
+    app.state.refresh_task = asyncio.create_task(refresh_loop())
+    app.state.bootstrap_task = asyncio.create_task(run_bootstrap_once())
 
 
 async def refresh_loop() -> None:
