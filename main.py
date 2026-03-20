@@ -51,13 +51,18 @@ def require_auth(credentials: HTTPAuthorizationCredentials | None = Depends(secu
 
 @app.on_event("startup")
 async def startup_event() -> None:
-    init_db()
+    app.state.db_init_task = asyncio.create_task(run_init_db_once())
     app.state.refresh_task = asyncio.create_task(refresh_loop())
     app.state.bootstrap_task = asyncio.create_task(run_bootstrap_once())
 
 
 @app.on_event("shutdown")
 async def shutdown_event() -> None:
+    db_init_task = getattr(app.state, "db_init_task", None)
+    if db_init_task:
+        db_init_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await db_init_task
     task = getattr(app.state, "refresh_task", None)
     if task:
         task.cancel()
@@ -80,7 +85,18 @@ async def refresh_loop() -> None:
         await asyncio.sleep(300)
 
 
+async def run_init_db_once() -> None:
+    try:
+        await asyncio.to_thread(init_db)
+    except Exception:
+        pass
+
+
 async def run_bootstrap_once() -> None:
+    init_task = getattr(app.state, "db_init_task", None)
+    if init_task:
+        with contextlib.suppress(asyncio.TimeoutError, Exception):
+            await asyncio.wait_for(asyncio.shield(init_task), timeout=120)
     await asyncio.sleep(1)
     try:
         await asyncio.to_thread(bootstrap_demo_project)
