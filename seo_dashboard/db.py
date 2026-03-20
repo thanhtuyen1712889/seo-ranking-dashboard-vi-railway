@@ -115,7 +115,6 @@ class ConnectionCompat:
 
     def commit(self) -> None:
         self._raw.commit()
-        self.sync()
 
     def rollback(self) -> None:
         self._raw.rollback()
@@ -200,10 +199,6 @@ def get_connection() -> ConnectionCompat:
             auth_token=str(DB_TARGET.get("auth_token") or ""),
         )
         connection = ConnectionCompat(raw_connection, backend)
-        try:
-            connection.sync()
-        except Exception:
-            pass
     else:
         raise ValueError("Unsupported database backend.")
 
