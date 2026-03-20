@@ -5,6 +5,7 @@ import json
 import os
 import re
 import secrets
+import time
 from collections import Counter, defaultdict
 from datetime import datetime
 from math import log
@@ -738,18 +739,44 @@ class DashboardService:
         sheet_url = (project.get("sheet_url") or "").strip()
         if not sheet_url:
             raise ValueError("Project chưa có Google Sheet URL.")
-        payload, filename, gid, source_type = fetch_public_data_source(
-            sheet_url,
-            preferred_gid=project.get("sheet_gid"),
-        )
-        parsed = parse_spreadsheet_payload(filename, payload, source_name="Google Sheets")
-        return self._ingest_parsed_sheet(
-            project_id,
-            parsed,
-            source_type=source_type,
-            source_name="Google Sheets",
-            sheet_url=sheet_url,
-            sheet_gid=gid,
+        last_error: Exception | None = None
+        for attempt in range(3):
+            try:
+                payload, filename, gid, source_type = fetch_public_data_source(
+                    sheet_url,
+                    preferred_gid=project.get("sheet_gid"),
+                )
+                parsed = parse_spreadsheet_payload(filename, payload, source_name="Google Sheets")
+                return self._ingest_parsed_sheet(
+                    project_id,
+                    parsed,
+                    source_type=source_type,
+                    source_name="Google Sheets",
+                    sheet_url=sheet_url,
+                    sheet_gid=gid,
+                )
+            except Exception as exc:
+                last_error = exc
+                if attempt < 2 and self._is_transient_turso_error(exc):
+                    time.sleep(1 + attempt)
+                    continue
+                if self._is_transient_turso_error(exc):
+                    raise ValueError("Kết nối DB đang đồng bộ lại. Vui lòng bấm refresh lại sau vài giây.") from exc
+                raise
+        if last_error is not None:
+            raise last_error
+        raise ValueError("Không thể refresh dữ liệu từ Google Sheets.")
+
+    def _is_transient_turso_error(self, exc: Exception) -> bool:
+        message = str(exc).lower()
+        return any(
+            token in message
+            for token in (
+                "hrana",
+                "stream not found",
+                "connection reset",
+                "temporarily unavailable",
+            )
         )
 
     def _ingest_parsed_sheet(
