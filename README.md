@@ -1,6 +1,6 @@
 # SEO Ranking Dashboard
 
-Ứng dụng dashboard SEO production-ready với `FastAPI + React + TailwindCSS + Recharts + SQLite`.
+Ứng dụng dashboard SEO production-ready với `FastAPI + React + TailwindCSS + Recharts + SQLite/Turso`.
 
 ## Tính năng chính
 
@@ -12,6 +12,7 @@
 - Insight AI bằng Claude API, có fallback rule-based nếu không có key.
 - Auth đơn giản bằng `DASHBOARD_PASSWORD`.
 - Deploy một service duy nhất: FastAPI phục vụ cả API lẫn frontend build tại `frontend/dist`.
+- Hỗ trợ DB bền bằng Turso (`libsql`) + keepalive + snapshot backup tự động.
 
 ## Cấu trúc chính
 
@@ -61,10 +62,45 @@ http://127.0.0.1:8000
 5. Deploy → copy URL dạng https://your-app.up.railway.app
 6. Gửi link này cho khách hàng
 
+## Best Free Thực Tế: Turso + Keepalive + Snapshot Backup
+
+Mục tiêu: giảm tối đa rủi ro mất dữ liệu khi deploy/restart host.
+
+### 1. Tạo Turso database
+1. Tạo database trên Turso (ví dụ `seo-dashboard-prod`)
+2. Lấy:
+   - `TURSO_DATABASE_URL` dạng `libsql://...`
+   - `TURSO_AUTH_TOKEN`
+
+### 2. Set env trên host (Render/Railway)
+- `DATABASE_URL=libsql://your-db-your-org.turso.io`
+- `TURSO_AUTH_TOKEN=...`
+- `TURSO_REPLICA_PATH=./data/turso-replica.db`
+- `TURSO_SYNC_INTERVAL_SECONDS=5`
+- `AUTO_BACKUP_ENABLED=true`
+- `AUTO_BACKUP_KEEP_DAYS=30`
+
+### 3. Keepalive miễn phí
+- Dùng cron miễn phí (ví dụ `cron-job.org`, UptimeRobot) ping endpoint `/health` mỗi 6 giờ.
+- Mục tiêu: tránh lâu ngày không truy cập khiến dịch vụ ngủ quá lâu.
+- URL ping ví dụ: `https://your-app.onrender.com/health`.
+
+### 4. Snapshot backup tự động
+- App tự chạy maintenance trong background:
+  - ping DB keepalive
+  - tạo `report_snapshot` tự động mỗi ngày cho từng project có dữ liệu
+  - giữ lại số ngày backup theo `AUTO_BACKUP_KEEP_DAYS`
+
+API mới:
+- `GET /api/projects/{id}/backups` (liệt kê snapshot tự động)
+- `POST /api/projects/{id}/backups/run` (tạo snapshot ngay)
+- `POST /api/system/maintenance/run` (chạy maintenance thủ công)
+
 ## Lưu ý deploy
 
 - Railway sẽ build từ `Dockerfile` và đọc `railway.toml`.
 - SQLite nên dùng volume `/data` để dữ liệu không mất sau khi redeploy.
+- Khi dùng Turso: không cần phụ thuộc volume local để giữ DB chính.
 - Nếu không set `ANTHROPIC_API_KEY`, app vẫn chạy bình thường với insight rule-based.
 - Sau khi deploy, vào `Cài đặt` để nhập Google Sheet URL hoặc upload file demo.
 
@@ -83,4 +119,3 @@ http://127.0.0.1:8000
 - `POST /api/projects/{id}/insights/weekly`
 - `POST /api/projects/{id}/events`
 - `GET /health`
-

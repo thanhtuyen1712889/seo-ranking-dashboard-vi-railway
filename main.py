@@ -13,7 +13,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 
 from seo_dashboard.auth import create_token, dashboard_password, verify_token
-from seo_dashboard.db import init_db
+from seo_dashboard.db import init_db, ping_database
 from seo_dashboard.service import DashboardService
 
 
@@ -69,6 +69,7 @@ async def refresh_loop() -> None:
     while True:
         try:
             service.refresh_due_projects()
+            service.run_maintenance()
         except Exception:
             pass
         await asyncio.sleep(300)
@@ -415,6 +416,53 @@ def create_report_snapshot(
     _: dict[str, Any] = Depends(require_auth),
 ) -> dict[str, Any]:
     return service.create_report_snapshot_share(project_id, payload)
+
+
+@app.get("/api/projects/{project_id}/backups")
+def list_auto_backups(
+    project_id: int,
+    limit: int = Query(default=20),
+    _: dict[str, Any] = Depends(require_auth),
+) -> dict[str, Any]:
+    snapshots = service.list_auto_snapshots(project_id, limit=limit)
+    return {
+        "project_id": str(project_id),
+        "snapshots": [
+            {
+                "title": item.get("title"),
+                "url": item.get("url"),
+                "created_at": item.get("created_at"),
+            }
+            for item in snapshots
+        ],
+    }
+
+
+@app.post("/api/projects/{project_id}/backups/run")
+def run_project_backup(
+    project_id: int,
+    _: dict[str, Any] = Depends(require_auth),
+) -> dict[str, Any]:
+    snapshot = service.create_manual_backup_snapshot(project_id)
+    if not snapshot:
+        return {"ok": False, "detail": "Không tạo được snapshot."}
+    return {
+        "ok": True,
+        "project_id": str(project_id),
+        "title": snapshot.get("title"),
+        "url": snapshot.get("url"),
+        "created_at": snapshot.get("created_at"),
+    }
+
+
+@app.post("/api/system/maintenance/run")
+def run_maintenance_now(_: dict[str, Any] = Depends(require_auth)) -> dict[str, Any]:
+    return service.run_maintenance()
+
+
+@app.get("/api/system/storage")
+def storage_status(_: dict[str, Any] = Depends(require_auth)) -> dict[str, Any]:
+    return ping_database()
 
 
 @app.post("/api/public/{share_token}/login")

@@ -304,6 +304,13 @@ COMPILED_TAG_LIBRARY, RESERVED_TAG_SIGNATURES, TAG_LABELS = _compile_tag_library
 
 class DashboardService:
     def __init__(self) -> None:
+        self.auto_backup_enabled = str(os.getenv("AUTO_BACKUP_ENABLED", "true")).strip().lower() not in {
+            "0",
+            "false",
+            "no",
+            "off",
+        }
+        self.auto_backup_keep_days = max(3, int(os.getenv("AUTO_BACKUP_KEEP_DAYS", "30") or "30"))
         self._ensure_seedless()
 
     def _ensure_seedless(self) -> None:
@@ -456,6 +463,140 @@ class DashboardService:
             if share_type == "report_snapshot" and not latest["report_snapshot_url"]:
                 latest["report_snapshot_url"] = self._share_url(share_type, row["share_token"])
         return latest
+
+    def _read_system_state(self, key: str) -> str | None:
+        with get_connection() as connection:
+            row = connection.execute("SELECT value FROM system_state WHERE key = ?", (key,)).fetchone()
+        if not row:
+            return None
+        return str(row["value"]) if row["value"] is not None else None
+
+    def _write_system_state(self, key: str, value: str) -> None:
+        current_time = now_iso()
+        with transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO system_state (key, value, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+                """,
+                (key, value, current_time),
+            )
+
+    def _auto_snapshot_title(self, snapshot_date: str) -> str:
+        return f"[AUTO SNAPSHOT] {snapshot_date}"
+
+    def _create_daily_auto_snapshot(self, project_id: int, snapshot_date: str) -> dict[str, Any] | None:
+        title = self._auto_snapshot_title(snapshot_date)
+        with get_connection() as connection:
+            existing = connection.execute(
+                """
+                SELECT * FROM shared_views
+                WHERE project_id = ?
+                  AND share_type = 'report_snapshot'
+                  AND title = ?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (project_id, title),
+            ).fetchone()
+        if existing:
+            return self._share_payload(existing)
+        self._create_share(
+            project_id,
+            share_type="report_snapshot",
+            title=title,
+            password=None,
+            state=None,
+        )
+        self._cleanup_auto_snapshots(project_id)
+        return self.get_latest_auto_snapshot(project_id)
+
+    def _cleanup_auto_snapshots(self, project_id: int) -> None:
+        with get_connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, created_at
+                FROM shared_views
+                WHERE project_id = ?
+                  AND share_type = 'report_snapshot'
+                  AND title LIKE '[AUTO SNAPSHOT] %'
+                ORDER BY created_at DESC, id DESC
+                """,
+                (project_id,),
+            ).fetchall()
+        if len(rows) <= self.auto_backup_keep_days:
+            return
+        keep_ids = {int(row["id"]) for row in rows[: self.auto_backup_keep_days]}
+        with transaction() as connection:
+            for row in rows:
+                row_id = int(row["id"])
+                if row_id in keep_ids:
+                    continue
+                connection.execute("DELETE FROM shared_views WHERE id = ?", (row_id,))
+
+    def list_auto_snapshots(self, project_id: int, limit: int = 20) -> list[dict[str, Any]]:
+        with get_connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT *
+                FROM shared_views
+                WHERE project_id = ?
+                  AND share_type = 'report_snapshot'
+                  AND title LIKE '[AUTO SNAPSHOT] %'
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+                """,
+                (project_id, max(1, min(limit, 100))),
+            ).fetchall()
+        return [self._share_payload(row) for row in rows]
+
+    def get_latest_auto_snapshot(self, project_id: int) -> dict[str, Any] | None:
+        snapshots = self.list_auto_snapshots(project_id, limit=1)
+        return snapshots[0] if snapshots else None
+
+    def create_manual_backup_snapshot(self, project_id: int) -> dict[str, Any] | None:
+        snapshot_date = datetime.now().date().isoformat()
+        return self._create_daily_auto_snapshot(project_id, snapshot_date)
+
+    def run_maintenance(self) -> dict[str, Any]:
+        """Keep DB active and create one automatic snapshot per day."""
+        keepalive_ok = False
+        try:
+            with get_connection() as connection:
+                connection.execute("SELECT 1 AS alive").fetchone()
+                keepalive_ok = True
+        except Exception:
+            keepalive_ok = False
+
+        created_snapshots: list[dict[str, Any]] = []
+        snapshot_date = datetime.now().date().isoformat()
+        if self.auto_backup_enabled:
+            last_snapshot_date = self._read_system_state("last_auto_snapshot_date")
+            if snapshot_date != last_snapshot_date:
+                for project in self.list_projects():
+                    project_id = int(project["id"])
+                    if not self.get_project_dates(project_id):
+                        continue
+                    snapshot = self._create_daily_auto_snapshot(project_id, snapshot_date)
+                    if snapshot:
+                        created_snapshots.append(
+                            {
+                                "project_id": str(project_id),
+                                "title": snapshot.get("title"),
+                                "url": snapshot.get("url"),
+                                "created_at": snapshot.get("created_at"),
+                            }
+                        )
+                self._write_system_state("last_auto_snapshot_date", snapshot_date)
+            self._write_system_state("last_keepalive_at", now_iso())
+
+        return {
+            "keepalive_ok": keepalive_ok,
+            "auto_backup_enabled": self.auto_backup_enabled,
+            "snapshot_date": snapshot_date,
+            "snapshots_created": created_snapshots,
+        }
 
     def _safe_public_project(self, project: dict[str, Any]) -> dict[str, Any]:
         return {

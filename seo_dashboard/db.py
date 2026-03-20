@@ -3,45 +3,225 @@ from __future__ import annotations
 import os
 import sqlite3
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator, Sequence
 
+try:
+    import libsql
+except ModuleNotFoundError:  # pragma: no cover - optional runtime dependency
+    libsql = None
 
 ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_DATABASE_URL = "sqlite:////data/seo_dashboard.db" if Path("/data").exists() else "sqlite:///./data/seo_dashboard.db"
+DEFAULT_SQLITE_URL = "sqlite:////data/seo_dashboard.db" if Path("/data").exists() else "sqlite:///./data/seo_dashboard.db"
+DEFAULT_DATABASE_URL = os.getenv("TURSO_DATABASE_URL", "").strip() or DEFAULT_SQLITE_URL
 
 
-def resolve_database_path(database_url: str | None = None) -> Path:
-    url = (database_url or os.getenv("DATABASE_URL") or DEFAULT_DATABASE_URL).strip()
-    if not url.startswith("sqlite:///"):
-        raise ValueError("Only sqlite DATABASE_URL values are supported.")
+class RowCompat:
+    """Provide sqlite3.Row-like access for libsql tuple rows."""
+
+    __slots__ = ("_columns", "_values", "_index")
+
+    def __init__(self, columns: Sequence[str], values: Sequence[Any]) -> None:
+        self._columns = tuple(columns)
+        self._values = tuple(values)
+        self._index = {name: idx for idx, name in enumerate(self._columns)}
+
+    def __getitem__(self, key: int | slice | str) -> Any:
+        if isinstance(key, (int, slice)):
+            return self._values[key]
+        idx = self._index.get(str(key))
+        if idx is None:
+            raise KeyError(key)
+        return self._values[idx]
+
+    def __iter__(self):
+        return iter(self._values)
+
+    def __len__(self) -> int:
+        return len(self._values)
+
+    def keys(self) -> list[str]:
+        return list(self._columns)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        if key in self._index:
+            return self[key]
+        return default
+
+    def items(self) -> list[tuple[str, Any]]:
+        return [(name, self._values[idx]) for idx, name in enumerate(self._columns)]
+
+    def __repr__(self) -> str:
+        return f"RowCompat({dict(self.items())!r})"
+
+
+class CursorCompat:
+    __slots__ = ("_raw",)
+
+    def __init__(self, raw_cursor: Any) -> None:
+        self._raw = raw_cursor
+
+    def _convert(self, row: Any) -> Any:
+        if row is None:
+            return None
+        if isinstance(row, tuple) and getattr(self._raw, "description", None):
+            columns = [item[0] for item in self._raw.description]
+            return RowCompat(columns, row)
+        return row
+
+    def fetchone(self) -> Any:
+        return self._convert(self._raw.fetchone())
+
+    def fetchall(self) -> list[Any]:
+        return [self._convert(item) for item in self._raw.fetchall()]
+
+    def fetchmany(self, size: int | None = None) -> list[Any]:
+        if size is None:
+            rows = self._raw.fetchmany()
+        else:
+            rows = self._raw.fetchmany(size)
+        return [self._convert(item) for item in rows]
+
+    def __iter__(self):
+        while True:
+            row = self.fetchone()
+            if row is None:
+                break
+            yield row
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._raw, name)
+
+
+class ConnectionCompat:
+    __slots__ = ("_raw", "_backend")
+
+    def __init__(self, raw_connection: Any, backend: str) -> None:
+        self._raw = raw_connection
+        self._backend = backend
+
+    def execute(self, sql: str, params: Sequence[Any] | None = None) -> CursorCompat:
+        cursor = self._raw.execute(sql, () if params is None else params)
+        return CursorCompat(cursor)
+
+    def executemany(self, sql: str, seq_of_params: Sequence[Sequence[Any]]) -> CursorCompat:
+        cursor = self._raw.executemany(sql, seq_of_params)
+        return CursorCompat(cursor)
+
+    def executescript(self, script: str) -> CursorCompat:
+        cursor = self._raw.executescript(script)
+        return CursorCompat(cursor)
+
+    def commit(self) -> None:
+        self._raw.commit()
+        self.sync()
+
+    def rollback(self) -> None:
+        self._raw.rollback()
+
+    def close(self) -> None:
+        self._raw.close()
+
+    def sync(self) -> None:
+        sync = getattr(self._raw, "sync", None)
+        if callable(sync):
+            sync()
+
+    def __enter__(self) -> ConnectionCompat:
+        enter = getattr(self._raw, "__enter__", None)
+        if callable(enter):
+            enter()
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        exit_method = getattr(self._raw, "__exit__", None)
+        if callable(exit_method):
+            return bool(exit_method(exc_type, exc, tb))
+        if exc_type is None:
+            self.commit()
+        else:
+            self.rollback()
+        self.close()
+        return False
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._raw, name)
+
+
+def _resolve_sqlite_path(url: str) -> Path:
     raw_path = url.removeprefix("sqlite:///")
-    if raw_path.startswith("/"):
-        path = Path(raw_path)
-    else:
-        path = (ROOT / raw_path).resolve()
+    path = Path(raw_path) if raw_path.startswith("/") else (ROOT / raw_path).resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
     return path
 
 
-DB_PATH = resolve_database_path()
+def resolve_database_target(database_url: str | None = None) -> dict[str, Any]:
+    url = (database_url or os.getenv("DATABASE_URL") or DEFAULT_DATABASE_URL).strip()
+    if url.startswith("sqlite:///"):
+        return {
+            "backend": "sqlite",
+            "url": url,
+            "sqlite_path": _resolve_sqlite_path(url),
+        }
+    if url.startswith("libsql://") or url.startswith("https://"):
+        replica_env = os.getenv("TURSO_REPLICA_PATH", "./data/turso-replica.db")
+        replica_path = Path(replica_env) if Path(replica_env).is_absolute() else (ROOT / replica_env).resolve()
+        replica_path.parent.mkdir(parents=True, exist_ok=True)
+        auth_token = os.getenv("TURSO_AUTH_TOKEN", "").strip()
+        sync_interval = int(os.getenv("TURSO_SYNC_INTERVAL_SECONDS", "5") or "5")
+        return {
+            "backend": "turso",
+            "url": url,
+            "sqlite_path": replica_path,
+            "auth_token": auth_token,
+            "sync_interval": sync_interval,
+        }
+    raise ValueError("Unsupported DATABASE_URL. Use sqlite:///... or libsql://...")
 
 
-def get_connection() -> sqlite3.Connection:
-    connection = sqlite3.connect(str(DB_PATH), check_same_thread=False)
-    connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA journal_mode=WAL;")
-    connection.execute("PRAGMA foreign_keys=ON;")
-    connection.execute("PRAGMA synchronous=NORMAL;")
+DB_TARGET = resolve_database_target()
+DB_PATH = DB_TARGET["sqlite_path"]
+
+
+def get_connection() -> ConnectionCompat:
+    backend = str(DB_TARGET["backend"])
+    if backend == "sqlite":
+        raw_connection = sqlite3.connect(str(DB_PATH), check_same_thread=False)
+        raw_connection.row_factory = sqlite3.Row
+        connection = ConnectionCompat(raw_connection, backend)
+    elif backend == "turso":
+        if libsql is None:
+            raise RuntimeError("DATABASE_URL is libsql:// but libsql package is not installed.")
+        raw_connection = libsql.connect(
+            str(DB_PATH),
+            sync_url=str(DB_TARGET["url"]),
+            sync_interval=int(DB_TARGET["sync_interval"]),
+            auth_token=str(DB_TARGET.get("auth_token") or ""),
+        )
+        connection = ConnectionCompat(raw_connection, backend)
+        try:
+            connection.sync()
+        except Exception:
+            pass
+    else:
+        raise ValueError("Unsupported database backend.")
+
+    # Keep pragmas best-effort because some backends may not support all options.
+    for statement in ("PRAGMA foreign_keys=ON;", "PRAGMA journal_mode=WAL;", "PRAGMA synchronous=NORMAL;"):
+        try:
+            connection.execute(statement)
+        except Exception:
+            continue
     return connection
 
 
-def _column_exists(connection: sqlite3.Connection, table: str, column: str) -> bool:
+def _column_exists(connection: ConnectionCompat, table: str, column: str) -> bool:
     rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
     return any(row["name"] == column for row in rows)
 
 
-def _ensure_column(connection: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
+def _ensure_column(connection: ConnectionCompat, table: str, column: str, ddl: str) -> None:
     if not _column_exists(connection, table, column):
         connection.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
 
@@ -147,6 +327,12 @@ def init_db() -> None:
                 FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
             );
 
+            CREATE TABLE IF NOT EXISTS system_state (
+                key TEXT PRIMARY KEY,
+                value TEXT,
+                updated_at TEXT NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_keywords_project ON keywords(project_id);
             CREATE INDEX IF NOT EXISTS idx_keywords_group ON keywords(project_id, group_name);
             CREATE INDEX IF NOT EXISTS idx_rankings_keyword_date ON rankings(keyword_id, rank_date);
@@ -182,7 +368,7 @@ def init_db() -> None:
 
 
 @contextmanager
-def transaction() -> Iterator[sqlite3.Connection]:
+def transaction() -> Iterator[ConnectionCompat]:
     connection = get_connection()
     try:
         yield connection
@@ -192,3 +378,16 @@ def transaction() -> Iterator[sqlite3.Connection]:
         raise
     finally:
         connection.close()
+
+
+def ping_database() -> dict[str, Any]:
+    started_at = datetime.now()
+    with get_connection() as connection:
+        row = connection.execute("SELECT 1 AS alive").fetchone()
+    elapsed_ms = int((datetime.now() - started_at).total_seconds() * 1000)
+    return {
+        "backend": str(DB_TARGET["backend"]),
+        "database_url": str(DB_TARGET["url"]),
+        "alive": bool(row and row["alive"] == 1),
+        "latency_ms": elapsed_ms,
+    }
