@@ -76,10 +76,11 @@ async def shutdown_event() -> None:
 
 
 async def refresh_loop() -> None:
+    await asyncio.sleep(2)
     while True:
         try:
-            service.refresh_due_projects()
-            service.run_maintenance()
+            await asyncio.to_thread(service.refresh_due_projects)
+            await asyncio.to_thread(service.run_maintenance)
         except Exception:
             pass
         await asyncio.sleep(300)
