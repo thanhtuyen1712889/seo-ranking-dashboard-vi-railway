@@ -337,6 +337,7 @@ class DashboardService:
     def _project_payload(self, row: Any) -> dict[str, Any]:
         project = dict(row)
         project["saved_view_state"] = self._load_json_blob(project.get("saved_view_state"), {})
+        project.pop("refresh_result_json", None)
         return project
 
     def _normalize_view_state(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -735,13 +736,14 @@ class DashboardService:
         result: dict[str, Any] | None,
     ) -> dict[str, Any]:
         safe_status = (status or "idle").strip().lower() or "idle"
+        compact_result = self._compact_refresh_result(result)
         payload = {
             "status": safe_status,
             "project_id": project_id,
             "started_at": started_at,
             "finished_at": finished_at,
             "error": error,
-            "result": result,
+            "result": compact_result,
         }
         with self._refresh_jobs_lock:
             self._refresh_jobs[project_id] = dict(payload)
@@ -758,11 +760,30 @@ class DashboardService:
                     started_at,
                     finished_at,
                     error,
-                    json.dumps(result, ensure_ascii=False) if result is not None else None,
+                    json.dumps(compact_result, ensure_ascii=False) if compact_result is not None else None,
                     project_id,
                 ),
             )
         return payload
+
+    def _compact_refresh_result(self, result: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not isinstance(result, dict):
+            return None
+        project = result.get("project") if isinstance(result.get("project"), dict) else {}
+        warnings = result.get("warnings")
+        if not isinstance(warnings, list):
+            warnings = []
+        new_dates = result.get("new_dates")
+        if not isinstance(new_dates, list):
+            new_dates = []
+        return {
+            "imported_keywords": int(result.get("imported_keywords") or 0),
+            "imported_rankings": int(result.get("imported_rankings") or 0),
+            "new_dates_count": len(new_dates),
+            "new_dates": new_dates[:8],
+            "warnings": [str(item) for item in warnings[:8]],
+            "last_pulled_at": project.get("last_pulled_at"),
+        }
 
     def _project_refresh_job(self, project: dict[str, Any]) -> dict[str, Any]:
         return {
