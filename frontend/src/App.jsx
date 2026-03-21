@@ -132,6 +132,8 @@ export default function App() {
     rank_min: 0,
     rank_max: 101,
     movers_only: false,
+    sort_by: "current_rank",
+    sort_dir: "asc",
   });
   const deferredSearch = useDeferredValue(keywordFilters.search);
 
@@ -205,6 +207,8 @@ export default function App() {
     keywordFilters.rank_min,
     keywordFilters.rank_max,
     keywordFilters.movers_only,
+    keywordFilters.sort_by,
+    keywordFilters.sort_dir,
     deferredSearch,
   ]);
 
@@ -279,6 +283,8 @@ export default function App() {
     keywordFilters.rank_min,
     keywordFilters.rank_max,
     keywordFilters.movers_only,
+    keywordFilters.sort_by,
+    keywordFilters.sort_dir,
   ]);
 
   async function loadProjectsList(preferredProjectId) {
@@ -380,6 +386,11 @@ export default function App() {
             (preserveExisting ? keywordFilters.movers_only : undefined) ??
             savedKeywordFilters.movers_only ??
             false,
+          sort_by: (preserveExisting ? keywordFilters.sort_by : "") || savedKeywordFilters.sort_by || "current_rank",
+          sort_dir:
+            (preserveExisting ? keywordFilters.sort_dir : "") ||
+            savedKeywordFilters.sort_dir ||
+            "asc",
         };
         setWeeklyNoteRange(nextWeeklyRange);
         setGroupFilters(nextGroupFilters);

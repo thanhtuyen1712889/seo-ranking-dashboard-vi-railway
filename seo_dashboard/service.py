@@ -385,6 +385,10 @@ class DashboardService:
                 "rank_min": float(keyword_filters.get("rank_min") or 0),
                 "rank_max": float(keyword_filters.get("rank_max") or 101),
                 "movers_only": bool(keyword_filters.get("movers_only")),
+                "sort_by": str(keyword_filters.get("sort_by") or "current_rank").strip() or "current_rank",
+                "sort_dir": "desc"
+                if str(keyword_filters.get("sort_dir") or "asc").strip().lower() == "desc"
+                else "asc",
             },
         }
 
@@ -3484,8 +3488,8 @@ class DashboardService:
         groups_filter = {item for item in (filters.get("groups") or "").split(",") if item}
         clusters_filter = {item for item in (filters.get("clusters") or "").split(",") if item}
         status_filter = (filters.get("status") or "all").strip()
-        sort_by = filters.get("sort_by") or "current_rank"
-        sort_dir = filters.get("sort_dir") or "asc"
+        sort_by_raw = str(filters.get("sort_by") or "current_rank").strip()
+        sort_dir = "desc" if str(filters.get("sort_dir") or "asc").strip().lower() == "desc" else "asc"
         vol_min = int(filters.get("vol_min") or 0)
         vol_max = int(filters.get("vol_max") or 1000000)
         rank_min = float(filters.get("rank_min") or 0)
@@ -3534,14 +3538,51 @@ class DashboardService:
                 }
             )
 
-        reverse = sort_dir == "desc"
-        rows.sort(key=lambda item: (item.get(sort_by) is None, item.get(sort_by)), reverse=reverse)
+        sortable_fields = {
+            "index",
+            "group_name",
+            "cluster_name",
+            "keyword",
+            "search_volume",
+            "best_rank",
+            "current_rank",
+            "delta_prev",
+            "kpi_status",
+        }
+        sort_date = None
+        if sort_by_raw.startswith("date:"):
+            candidate = sort_by_raw.split(":", 1)[1]
+            if candidate in dates:
+                sort_date = candidate
+                sort_by = f"date:{candidate}"
+            else:
+                sort_by = "current_rank"
+        elif sort_by_raw in sortable_fields:
+            sort_by = sort_by_raw
+        else:
+            sort_by = "current_rank"
+
+        def _sort_value(item: dict[str, Any]) -> Any:
+            if sort_date:
+                value = item.get("positions", {}).get(sort_date)
+            else:
+                value = item.get(sort_by)
+            if isinstance(value, str):
+                return value.lower()
+            return value
+
+        non_missing = [item for item in rows if _sort_value(item) is not None]
+        missing = [item for item in rows if _sort_value(item) is None]
+        non_missing.sort(key=_sort_value, reverse=sort_dir == "desc")
+        rows = non_missing + missing
         return {
             "dates": dates,
             "rows": rows,
             "groups": sorted({row["group_name"] for row in rows}),
             "clusters": sorted({row["cluster_name"] for row in rows}),
             "current_date": current_date,
+            "sort_by": sort_by,
+            "sort_dir": sort_dir,
         }
 
     def export_keyword_table(self, project_id: int, filters: dict[str, Any]) -> bytes:

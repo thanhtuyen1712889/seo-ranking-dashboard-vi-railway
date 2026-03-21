@@ -91,6 +91,8 @@ export default function PublicShareView({ shareToken, shareType }) {
             keyword_rank_min: keywordFilters?.rank_min,
             keyword_rank_max: keywordFilters?.rank_max,
             keyword_movers_only: keywordFilters?.movers_only,
+            keyword_sort_by: keywordFilters?.sort_by || undefined,
+            keyword_sort_dir: keywordFilters?.sort_dir || undefined,
           },
           publicToken,
         );
@@ -130,6 +132,8 @@ export default function PublicShareView({ shareToken, shareType }) {
           rank_min: response.view_state?.keyword_filters?.rank_min ?? 0,
           rank_max: response.view_state?.keyword_filters?.rank_max ?? 101,
           movers_only: response.view_state?.keyword_filters?.movers_only ?? false,
+          sort_by: response.keyword_table?.sort_by || response.view_state?.keyword_filters?.sort_by || "current_rank",
+          sort_dir: response.keyword_table?.sort_dir || response.view_state?.keyword_filters?.sort_dir || "asc",
         });
       } catch (requestError) {
         if (cancelled) return;
@@ -161,6 +165,8 @@ export default function PublicShareView({ shareToken, shareType }) {
     keywordFilters?.rank_min,
     keywordFilters?.rank_max,
     keywordFilters?.movers_only,
+    keywordFilters?.sort_by,
+    keywordFilters?.sort_dir,
     deferredSearch,
   ]);
 
@@ -378,6 +384,8 @@ export default function PublicShareView({ shareToken, shareType }) {
               rank_min: 0,
               rank_max: 101,
               movers_only: false,
+              sort_by: "current_rank",
+              sort_dir: "asc",
             }}
             setFilters={setKeywordFilters}
             mode={mode}

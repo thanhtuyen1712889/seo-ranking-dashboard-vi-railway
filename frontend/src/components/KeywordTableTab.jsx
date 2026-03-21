@@ -17,6 +17,8 @@ export default function KeywordTableTab({
 
   const currentDate = data.current_date || data.dates[data.dates.length - 1];
   const orderedDates = [...data.dates].reverse();
+  const currentSortBy = data.sort_by || filters.sort_by || "current_rank";
+  const currentSortDir = data.sort_dir || filters.sort_dir || "asc";
   const stickyColumns =
     mode === "team"
       ? [
@@ -46,6 +48,69 @@ export default function KeywordTableTab({
       },
       className: `sticky ${isHeader ? "z-20 bg-[#0f1723]" : "z-10 bg-[#111723]"} ${index === stickyColumns.length - 1 ? "shadow-[10px_0_24px_rgba(3,7,18,0.55)]" : ""}`,
     };
+  }
+
+  function nextSortDirection(columnKey) {
+    if (currentSortBy === columnKey) {
+      return currentSortDir === "asc" ? "desc" : "asc";
+    }
+    return "asc";
+  }
+
+  function applySort(columnKey) {
+    setFilters({
+      ...filters,
+      sort_by: columnKey,
+      sort_dir: nextSortDirection(columnKey),
+    });
+  }
+
+  function sortArrow(columnKey) {
+    if (currentSortBy !== columnKey) return "↕";
+    return currentSortDir === "asc" ? "▲" : "▼";
+  }
+
+  function sortArrowClass(columnKey) {
+    return currentSortBy === columnKey ? "text-neon-cyan" : "text-slate-500";
+  }
+
+  function currentSortLabel() {
+    if (currentSortBy.startsWith("date:")) {
+      const sortDate = currentSortBy.split(":")[1];
+      return `Ngày ${formatDateLabel(sortDate)}`;
+    }
+    const labels = {
+      index: "#",
+      group_name: "Bộ",
+      keyword: "Keyword",
+      search_volume: "Vol",
+      best_rank: "Best Rank",
+      current_rank: "Hạng hiện tại",
+      delta_prev: "Thay Đổi",
+      kpi_status: "KPI Status",
+    };
+    return labels[currentSortBy] || "Hạng hiện tại";
+  }
+
+  function SortableHeaderCell({ label, columnKey, className = "", stickyIndex = null }) {
+    const sticky = stickyIndex === null ? null : stickyProps(stickyIndex, true);
+    return (
+      <th
+        {...(sticky || {})}
+        className={`${sticky?.className || ""} top-0 border-b border-white/10 px-4 py-3 text-left font-semibold ${className}`}
+      >
+        <button
+          type="button"
+          className="inline-flex items-center gap-2 text-inherit transition hover:text-white"
+          onClick={() => applySort(columnKey)}
+          aria-label={`Sắp xếp theo ${label}`}
+          title={`Sắp xếp theo ${label}`}
+        >
+          <span>{label}</span>
+          <span className={`text-[11px] ${sortArrowClass(columnKey)}`}>{sortArrow(columnKey)}</span>
+        </button>
+      </th>
+    );
   }
 
   return (
@@ -115,27 +180,48 @@ export default function KeywordTableTab({
         <div className="flex flex-wrap items-center gap-3 border-b border-white/10 px-5 py-4 text-sm text-slate-400">
           <span className="chip border-neon-cyan/30 bg-neon-cyan/10 text-neon-cyan">Ngày hiện tại nằm bên trái: {formatDateLabel(currentDate)}</span>
           <span className="chip">Ngày quá khứ kéo dần về bên phải</span>
+          <span className="chip">Sắp xếp: {currentSortLabel()} ({currentSortDir === "asc" ? "tăng dần" : "giảm dần"})</span>
           <span>6 cột đầu và hàng tiêu đề đã được cố định để kéo ngang hoặc kéo dọc vẫn bám được dữ liệu.</span>
         </div>
         <div className="max-h-[72vh] overflow-auto">
           <table className="min-w-full border-separate border-spacing-0 text-sm">
             <thead>
               <tr>
-                <th {...stickyProps(0, true)} className={`${stickyProps(0, true).className} top-0 border-b border-white/10 px-4 py-3 text-left font-semibold text-slate-400`}>#</th>
-                <th {...stickyProps(1, true)} className={`${stickyProps(1, true).className} top-0 border-b border-white/10 px-4 py-3 text-left font-semibold text-slate-400`}>Bộ</th>
-                <th {...stickyProps(2, true)} className={`${stickyProps(2, true).className} top-0 border-b border-white/10 px-4 py-3 text-left font-semibold text-slate-400`}>Keyword</th>
-                {mode === "team" ? <th {...stickyProps(3, true)} className={`${stickyProps(3, true).className} top-0 border-b border-white/10 px-4 py-3 text-left font-semibold text-slate-400`}>Vol</th> : null}
-                {mode === "team" ? <th {...stickyProps(4, true)} className={`${stickyProps(4, true).className} top-0 border-b border-white/10 px-4 py-3 text-left font-semibold text-slate-400`}>Best Rank</th> : null}
-                <th {...stickyProps(mode === "team" ? 5 : 3, true)} className={`${stickyProps(mode === "team" ? 5 : 3, true).className} top-0 border-b border-white/10 px-4 py-3 text-left font-semibold text-slate-400`}>Thay Đổi</th>
+                <SortableHeaderCell label="#" columnKey="index" className="text-slate-400" stickyIndex={0} />
+                <SortableHeaderCell label="Bộ" columnKey="group_name" className="text-slate-400" stickyIndex={1} />
+                <SortableHeaderCell label="Keyword" columnKey="keyword" className="text-slate-400" stickyIndex={2} />
+                {mode === "team" ? <SortableHeaderCell label="Vol" columnKey="search_volume" className="text-slate-400" stickyIndex={3} /> : null}
+                {mode === "team" ? <SortableHeaderCell label="Best Rank" columnKey="best_rank" className="text-slate-400" stickyIndex={4} /> : null}
+                <SortableHeaderCell label="Thay Đổi" columnKey="delta_prev" className="text-slate-400" stickyIndex={mode === "team" ? 5 : 3} />
                 {orderedDates.map((date) => (
                   <th
                     key={date}
                     className={`sticky top-0 z-10 border-b px-3 py-3 text-center font-semibold ${date === currentDate ? "border-neon-cyan/35 bg-[#0f1723] text-neon-cyan" : "border-white/10 bg-[#0f1723] text-slate-400"}`}
                   >
-                    {formatDateLabel(date)}
+                    <button
+                      type="button"
+                      className="inline-flex items-center gap-2 transition hover:text-white"
+                      onClick={() => applySort(`date:${date}`)}
+                      aria-label={`Sắp xếp theo ngày ${formatDateLabel(date)}`}
+                      title={`Sắp xếp theo ngày ${formatDateLabel(date)}`}
+                    >
+                      <span>{formatDateLabel(date)}</span>
+                      <span className={`text-[11px] ${sortArrowClass(`date:${date}`)}`}>{sortArrow(`date:${date}`)}</span>
+                    </button>
                   </th>
                 ))}
-                <th className="sticky top-0 z-10 border-b border-white/10 bg-[#0f1723] px-4 py-3 text-left font-semibold text-slate-400">KPI Status</th>
+                <th className="sticky top-0 z-10 border-b border-white/10 bg-[#0f1723] px-4 py-3 text-left font-semibold text-slate-400">
+                  <button
+                    type="button"
+                    className="inline-flex items-center gap-2 transition hover:text-white"
+                    onClick={() => applySort("kpi_status")}
+                    aria-label="Sắp xếp theo KPI Status"
+                    title="Sắp xếp theo KPI Status"
+                  >
+                    <span>KPI Status</span>
+                    <span className={`text-[11px] ${sortArrowClass("kpi_status")}`}>{sortArrow("kpi_status")}</span>
+                  </button>
+                </th>
               </tr>
             </thead>
             <tbody>
