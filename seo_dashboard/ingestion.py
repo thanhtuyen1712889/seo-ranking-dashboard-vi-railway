@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import os
 import re
 import unicodedata
 from dataclasses import dataclass
@@ -46,6 +47,8 @@ BRAND_MODIFIERS = [
 COMMERCIAL_TERMS = ["buy", "best", "extension", "plugin", "module", "addon", "tool", "software", "dịch vụ", "giá"]
 INFORMATIONAL_TERMS = ["what is", "guide", "how to", "la gi", "là gì", "huong dan", "hướng dẫn", "cach", "cách"]
 MODIFIER_TERMS = ["module", "plugin", "extension", "addon", "tool", "software"]
+REMOTE_FETCH_TIMEOUT_SECONDS = max(5, int(os.getenv("REMOTE_FETCH_TIMEOUT_SECONDS", "12") or "12"))
+PUBLIC_FETCH_TIMEOUT_SECONDS = max(8, int(os.getenv("PUBLIC_FETCH_TIMEOUT_SECONDS", "20") or "20"))
 
 
 @dataclass(slots=True)
@@ -576,7 +579,7 @@ def _filename_from_response(url: str, response: requests.Response, fallback_stem
 
 
 def _download_bytes(url: str) -> tuple[bytes, str]:
-    response = requests.get(url, timeout=30)
+    response = requests.get(url, timeout=REMOTE_FETCH_TIMEOUT_SECONDS)
     if response.status_code >= 400:
         raise ValueError(f"Không tải được dữ liệu từ Google Sheets ({response.status_code}).")
     content_type = response.headers.get("content-type", "")
@@ -633,7 +636,7 @@ def fetch_public_data_source(source_url: str, preferred_gid: str | None = None) 
         download_url = f"https://drive.google.com/uc?export=download&id={drive_file_id}"
         fallback_stem = "google-drive-file"
 
-    response = requests.get(download_url, timeout=45, allow_redirects=True)
+    response = requests.get(download_url, timeout=PUBLIC_FETCH_TIMEOUT_SECONDS, allow_redirects=True)
     if response.status_code >= 400:
         raise ValueError(f"Không tải được dữ liệu từ link public ({response.status_code}).")
     filename = _filename_from_response(normalized_url, response, fallback_stem)

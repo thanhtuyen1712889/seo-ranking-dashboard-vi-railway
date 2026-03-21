@@ -7,9 +7,8 @@ import re
 import secrets
 import threading
 import time
-import contextlib
 from collections import Counter, defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime
 from math import log
 from statistics import mean
 from typing import Any
@@ -191,8 +190,6 @@ TAG_PRIORITY = {
     family: [f"{family}:{tag_key}" for tag_key in family_tags]
     for family, family_tags in TAG_LIBRARY.items()
 }
-
-REFRESH_STALE_MINUTES = 30
 
 SUB_CLUSTER_MODE_META = {
     "auto": {
@@ -908,24 +905,17 @@ class DashboardService:
             job = self._project_refresh_job(project)
             # Job in DB says running but worker state is gone -> mark failed immediately.
             if job.get("status") == "running":
-                started_at = job.get("started_at")
-                should_fail = True
-                if started_at:
-                    with contextlib.suppress(Exception):
-                        started = datetime.fromisoformat(started_at)
-                        should_fail = datetime.now() - started > timedelta(minutes=REFRESH_STALE_MINUTES)
-                if should_fail:
-                    job = self._set_refresh_job_state(
-                        project_id,
-                        status="failed",
-                        started_at=job.get("started_at"),
-                        finished_at=now_iso(),
-                        error="Refresh bị gián đoạn do service khởi động lại hoặc timeout. Vui lòng thử lại.",
-                        result=None,
-                    )
-                else:
-                    with self._refresh_jobs_lock:
-                        self._refresh_jobs[project_id] = dict(job)
+                job = self._set_refresh_job_state(
+                    project_id,
+                    status="failed",
+                    started_at=job.get("started_at"),
+                    finished_at=now_iso(),
+                    error="Refresh bị gián đoạn do service khởi động lại. Vui lòng bấm refresh lại.",
+                    result=None,
+                )
+            else:
+                with self._refresh_jobs_lock:
+                    self._refresh_jobs[project_id] = dict(job)
         return {
             "ok": True,
             "project_id": project_id,
