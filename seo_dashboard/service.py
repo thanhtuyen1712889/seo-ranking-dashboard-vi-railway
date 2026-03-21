@@ -7,8 +7,9 @@ import re
 import secrets
 import threading
 import time
+import contextlib
 from collections import Counter, defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta
 from math import log
 from statistics import mean
 from typing import Any
@@ -191,6 +192,8 @@ TAG_PRIORITY = {
     for family, family_tags in TAG_LIBRARY.items()
 }
 
+REFRESH_STALE_MINUTES = 30
+
 SUB_CLUSTER_MODE_META = {
     "auto": {
         "label": "Auto",
@@ -315,6 +318,7 @@ class DashboardService:
         self.auto_backup_keep_days = max(3, int(os.getenv("AUTO_BACKUP_KEEP_DAYS", "30") or "30"))
         self._refresh_jobs: dict[int, dict[str, Any]] = {}
         self._refresh_jobs_lock = threading.Lock()
+        self._project_refresh_locks: dict[int, threading.Lock] = {}
         self._ensure_seedless()
 
     def _ensure_seedless(self) -> None:
@@ -713,6 +717,135 @@ class DashboardService:
         project = self.get_project(project_id)
         return (project.get("anthropic_api_key") or os.getenv("ANTHROPIC_API_KEY") or "").strip() or None
 
+    def _get_project_refresh_lock(self, project_id: int) -> threading.Lock:
+        with self._refresh_jobs_lock:
+            lock = self._project_refresh_locks.get(project_id)
+            if lock is None:
+                lock = threading.Lock()
+                self._project_refresh_locks[project_id] = lock
+            return lock
+
+    def _set_refresh_job_state(
+        self,
+        project_id: int,
+        *,
+        status: str,
+        started_at: str | None,
+        finished_at: str | None,
+        error: str | None,
+        result: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        safe_status = (status or "idle").strip().lower() or "idle"
+        payload = {
+            "status": safe_status,
+            "project_id": project_id,
+            "started_at": started_at,
+            "finished_at": finished_at,
+            "error": error,
+            "result": result,
+        }
+        with self._refresh_jobs_lock:
+            self._refresh_jobs[project_id] = dict(payload)
+        with transaction() as connection:
+            connection.execute(
+                """
+                UPDATE projects
+                SET refresh_status = ?, refresh_started_at = ?, refresh_finished_at = ?,
+                    refresh_error = ?, refresh_result_json = ?
+                WHERE id = ?
+                """,
+                (
+                    safe_status,
+                    started_at,
+                    finished_at,
+                    error,
+                    json.dumps(result, ensure_ascii=False) if result is not None else None,
+                    project_id,
+                ),
+            )
+        return payload
+
+    def _project_refresh_job(self, project: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "status": str(project.get("refresh_status") or "idle").strip().lower() or "idle",
+            "project_id": int(project["id"]),
+            "started_at": project.get("refresh_started_at"),
+            "finished_at": project.get("refresh_finished_at"),
+            "error": project.get("refresh_error"),
+            "result": self._load_json_blob(project.get("refresh_result_json"), None),
+        }
+
+    def recover_stale_refresh_jobs(self) -> int:
+        recovered = 0
+        current_time = now_iso()
+        with transaction() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, refresh_status
+                FROM projects
+                WHERE LOWER(COALESCE(refresh_status, 'idle')) = 'running'
+                """
+            ).fetchall()
+            for row in rows:
+                project_id = int(row["id"])
+                connection.execute(
+                    """
+                    UPDATE projects
+                    SET refresh_status = 'failed',
+                        refresh_finished_at = ?,
+                        refresh_error = ?,
+                        refresh_result_json = NULL
+                    WHERE id = ?
+                    """,
+                    (
+                        current_time,
+                        "Refresh trước đó bị gián đoạn do service khởi động lại. Vui lòng bấm refresh lại.",
+                        project_id,
+                    ),
+                )
+                recovered += 1
+        if recovered:
+            with self._refresh_jobs_lock:
+                for project in self.list_projects():
+                    project_id = int(project["id"])
+                    self._refresh_jobs[project_id] = self._project_refresh_job(project)
+        return recovered
+
+    def _run_refresh_job(self, project_id: int, started_at: str | None = None) -> dict[str, Any]:
+        project_lock = self._get_project_refresh_lock(project_id)
+        if not project_lock.acquire(blocking=False):
+            return self.get_google_sheet_refresh_status(project_id)
+        start_value = started_at or now_iso()
+        self._set_refresh_job_state(
+            project_id,
+            status="running",
+            started_at=start_value,
+            finished_at=None,
+            error=None,
+            result=None,
+        )
+        try:
+            result = self.refresh_from_google_sheet(project_id)
+            return self._set_refresh_job_state(
+                project_id,
+                status="completed",
+                started_at=start_value,
+                finished_at=now_iso(),
+                error=None,
+                result=result,
+            )
+        except Exception as exc:
+            return self._set_refresh_job_state(
+                project_id,
+                status="failed",
+                started_at=start_value,
+                finished_at=now_iso(),
+                error=str(exc),
+                result=None,
+            )
+        finally:
+            project_lock.release()
+
     def test_google_sheet(self, sheet_url: str, sheet_gid: str | None = None) -> dict[str, Any]:
         payload, filename, gid, source_type = fetch_public_data_source(sheet_url, preferred_gid=sheet_gid)
         parsed = parse_spreadsheet_payload(filename, payload, source_name="Google Sheets")
@@ -733,76 +866,66 @@ class DashboardService:
         if not (project.get("sheet_url") or "").strip():
             raise ValueError("Project chưa có Google Sheet URL.")
 
-        with self._refresh_jobs_lock:
-            existing = self._refresh_jobs.get(project_id)
-            if existing and existing.get("status") == "running":
-                return {
-                    "ok": True,
-                    "project_id": project_id,
-                    "status": "running",
-                    "started_at": existing.get("started_at"),
-                    "finished_at": None,
-                    "message": "Đang refresh dữ liệu. Vui lòng đợi hoàn tất.",
-                }
-            self._refresh_jobs[project_id] = {
-                "status": "running",
+        existing = self.get_google_sheet_refresh_status(project_id)
+        if existing.get("status") == "running":
+            return {
+                "ok": True,
                 "project_id": project_id,
-                "started_at": now_iso(),
+                "status": "running",
+                "started_at": existing.get("started_at"),
                 "finished_at": None,
-                "error": None,
-                "result": None,
+                "message": "Đang refresh dữ liệu. Vui lòng đợi hoàn tất.",
             }
 
+        started_at = now_iso()
+        self._set_refresh_job_state(
+            project_id,
+            status="running",
+            started_at=started_at,
+            finished_at=None,
+            error=None,
+            result=None,
+        )
+
         def _runner() -> None:
-            try:
-                result = self.refresh_from_google_sheet(project_id)
-                with self._refresh_jobs_lock:
-                    job = self._refresh_jobs.get(project_id, {})
-                    job.update(
-                        {
-                            "status": "completed",
-                            "finished_at": now_iso(),
-                            "error": None,
-                            "result": result,
-                        }
-                    )
-                    self._refresh_jobs[project_id] = job
-            except Exception as exc:  # pragma: no cover - async thread safety
-                with self._refresh_jobs_lock:
-                    job = self._refresh_jobs.get(project_id, {})
-                    job.update(
-                        {
-                            "status": "failed",
-                            "finished_at": now_iso(),
-                            "error": str(exc),
-                        }
-                    )
-                    self._refresh_jobs[project_id] = job
+            self._run_refresh_job(project_id, started_at=started_at)
 
         threading.Thread(target=_runner, name=f"refresh-project-{project_id}", daemon=True).start()
         return {
             "ok": True,
             "project_id": project_id,
             "status": "running",
-            "started_at": self._refresh_jobs[project_id]["started_at"],
+            "started_at": started_at,
             "finished_at": None,
             "message": "Đã bắt đầu refresh dữ liệu. Hệ thống sẽ cập nhật khi hoàn tất.",
         }
 
     def get_google_sheet_refresh_status(self, project_id: int) -> dict[str, Any]:
-        self.get_project(project_id)
+        project = self.get_project(project_id)
         with self._refresh_jobs_lock:
             job = dict(self._refresh_jobs.get(project_id) or {})
         if not job:
-            return {
-                "ok": True,
-                "project_id": project_id,
-                "status": "idle",
-                "started_at": None,
-                "finished_at": None,
-                "error": None,
-                "result": None,
-            }
+            job = self._project_refresh_job(project)
+            # Job in DB says running but worker state is gone -> mark failed immediately.
+            if job.get("status") == "running":
+                started_at = job.get("started_at")
+                should_fail = True
+                if started_at:
+                    with contextlib.suppress(Exception):
+                        started = datetime.fromisoformat(started_at)
+                        should_fail = datetime.now() - started > timedelta(minutes=REFRESH_STALE_MINUTES)
+                if should_fail:
+                    job = self._set_refresh_job_state(
+                        project_id,
+                        status="failed",
+                        started_at=job.get("started_at"),
+                        finished_at=now_iso(),
+                        error="Refresh bị gián đoạn do service khởi động lại hoặc timeout. Vui lòng thử lại.",
+                        result=None,
+                    )
+                else:
+                    with self._refresh_jobs_lock:
+                        self._refresh_jobs[project_id] = dict(job)
         return {
             "ok": True,
             "project_id": project_id,
@@ -3814,8 +3937,13 @@ class DashboardService:
                 if elapsed.total_seconds() < interval * 60:
                     continue
             try:
-                self.refresh_from_google_sheet(int(project["id"]))
-                refreshed.append(int(project["id"]))
+                project_id = int(project["id"])
+                status = self.get_google_sheet_refresh_status(project_id)
+                if status.get("status") == "running":
+                    continue
+                result = self._run_refresh_job(project_id)
+                if result.get("status") == "completed":
+                    refreshed.append(project_id)
             except Exception:
                 continue
         return refreshed

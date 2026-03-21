@@ -110,6 +110,7 @@ async def run_bootstrap_once() -> None:
             await asyncio.wait_for(asyncio.shield(init_task), timeout=120)
     await asyncio.sleep(1)
     try:
+        await asyncio.to_thread(service.recover_stale_refresh_jobs)
         await asyncio.to_thread(bootstrap_demo_project)
     except Exception:
         pass

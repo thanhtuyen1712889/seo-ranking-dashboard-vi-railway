@@ -480,14 +480,18 @@ export default function App() {
     if (!selectedProjectId) return;
     setPageLoading(true);
     try {
-      await refreshProject(token, selectedProjectId);
+      const trigger = await refreshProject(token, selectedProjectId);
       const startedAt = Date.now();
+      let sawRunning = trigger?.status === "running";
       let completed = false;
       while (Date.now() - startedAt < 180000) {
         await new Promise((resolve) => {
           setTimeout(resolve, 2000);
         });
         const status = await getRefreshStatus(token, selectedProjectId);
+        if (status.status === "running") {
+          sawRunning = true;
+        }
         if (status.status === "completed") {
           completed = true;
           break;
@@ -495,9 +499,18 @@ export default function App() {
         if (status.status === "failed") {
           throw new Error(status.error || "Refresh thất bại.");
         }
+        if (status.status === "idle" && sawRunning) {
+          completed = true;
+          break;
+        }
       }
       if (!completed) {
-        throw new Error("Hệ thống đang refresh lâu hơn bình thường. Vui lòng đợi thêm 1-2 phút rồi tải lại trang.");
+        await loadOverviewAndSettings(selectedProjectId);
+        setToast({
+          type: "success",
+          message: "Đã gửi lệnh refresh. Server đang xử lý nền, dữ liệu sẽ tự cập nhật sau ít phút.",
+        });
+        return;
       }
       await loadOverviewAndSettings(selectedProjectId);
       setToast({ type: "success", message: "Đã refresh dữ liệu từ Google Sheets." });

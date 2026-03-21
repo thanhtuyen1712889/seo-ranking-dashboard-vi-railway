@@ -37,26 +37,63 @@ async function request(path, { token, method = "GET", body, isForm = false } = {
   if (body && !isForm) {
     headers["Content-Type"] = "application/json";
   }
-  const response = await fetch(path, {
-    method,
-    headers,
-    body: body ? (isForm ? body : JSON.stringify(body)) : undefined,
-  });
-  if (!response.ok) {
-    let detail = "Có lỗi xảy ra.";
+  const RETRYABLE_HTTP_STATUS = new Set([408, 425, 429, 500, 502, 503, 504, 522, 524]);
+  const NETWORK_ERROR_PATTERNS = ["failed to fetch", "networkerror", "load failed", "fetch failed"];
+  const maxRetries = 4;
+
+  async function wait(ms) {
+    await new Promise((resolve) => window.setTimeout(resolve, ms));
+  }
+
+  for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
     try {
-      const payload = await response.json();
-      detail = payload.detail || detail;
-    } catch {
-      detail = response.statusText || detail;
+      const response = await fetch(path, {
+        method,
+        headers,
+        body: body ? (isForm ? body : JSON.stringify(body)) : undefined,
+      });
+
+      if (response.ok) {
+        const contentType = response.headers.get("content-type") || "";
+        if (contentType.includes("application/json")) {
+          return response.json();
+        }
+        return response.blob();
+      }
+
+      const statusRetryable = RETRYABLE_HTTP_STATUS.has(response.status);
+      if (statusRetryable && attempt < maxRetries) {
+        await wait(700 * (attempt + 1));
+        continue;
+      }
+
+      let detail = "Có lỗi xảy ra.";
+      const contentType = response.headers.get("content-type") || "";
+      if (contentType.includes("application/json")) {
+        try {
+          const payload = await response.json();
+          detail = payload.detail || detail;
+        } catch {
+          detail = response.statusText || detail;
+        }
+      } else if (response.status >= 500) {
+        detail = "Server đang bận hoặc vừa khởi động lại. Vui lòng thử lại sau vài giây.";
+      } else {
+        detail = response.statusText || detail;
+      }
+      throw new Error(detail);
+    } catch (error) {
+      const message = String(error?.message || "").toLowerCase();
+      const networkRetryable = NETWORK_ERROR_PATTERNS.some((item) => message.includes(item));
+      if (networkRetryable && attempt < maxRetries) {
+        await wait(700 * (attempt + 1));
+        continue;
+      }
+      throw error;
     }
-    throw new Error(detail);
   }
-  const contentType = response.headers.get("content-type") || "";
-  if (contentType.includes("application/json")) {
-    return response.json();
-  }
-  return response.blob();
+
+  throw new Error("Không thể kết nối tới server. Vui lòng thử lại.");
 }
 
 function buildQuery(params = {}) {
