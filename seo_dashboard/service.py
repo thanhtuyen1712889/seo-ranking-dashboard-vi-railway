@@ -191,6 +191,8 @@ TAG_PRIORITY = {
     for family, family_tags in TAG_LIBRARY.items()
 }
 
+REFRESH_RUNNING_TIMEOUT_SECONDS = max(90, int(os.getenv("REFRESH_RUNNING_TIMEOUT_SECONDS", "180") or "180"))
+
 SUB_CLUSTER_MODE_META = {
     "auto": {
         "label": "Auto",
@@ -772,6 +774,19 @@ class DashboardService:
             "result": self._load_json_blob(project.get("refresh_result_json"), None),
         }
 
+    def _refresh_job_timed_out(self, job: dict[str, Any]) -> bool:
+        if (job.get("status") or "").strip().lower() != "running":
+            return False
+        started_at = str(job.get("started_at") or "").strip()
+        if not started_at:
+            return False
+        try:
+            started = datetime.fromisoformat(started_at)
+        except ValueError:
+            return False
+        elapsed_seconds = (datetime.now() - started).total_seconds()
+        return elapsed_seconds > REFRESH_RUNNING_TIMEOUT_SECONDS
+
     def recover_stale_refresh_jobs(self) -> int:
         recovered = 0
         current_time = now_iso()
@@ -901,7 +916,16 @@ class DashboardService:
         project = self.get_project(project_id)
         with self._refresh_jobs_lock:
             job = dict(self._refresh_jobs.get(project_id) or {})
-        if not job:
+        if job and self._refresh_job_timed_out(job):
+            job = self._set_refresh_job_state(
+                project_id,
+                status="failed",
+                started_at=job.get("started_at"),
+                finished_at=now_iso(),
+                error="Refresh quá thời gian xử lý cho phép. Vui lòng kiểm tra link sheet public rồi bấm refresh lại.",
+                result=None,
+            )
+        elif not job:
             job = self._project_refresh_job(project)
             # Job in DB says running but worker state is gone -> mark failed immediately.
             if job.get("status") == "running":
