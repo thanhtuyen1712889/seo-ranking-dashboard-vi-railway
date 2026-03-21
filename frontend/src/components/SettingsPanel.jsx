@@ -7,6 +7,7 @@ export default function SettingsPanel({
   settings,
   uploading,
   testingSheet,
+  sheetTestStatus,
   saving,
   dragActive,
   setDragActive,
@@ -131,6 +132,19 @@ export default function SettingsPanel({
                     hoặc nhập gid thủ công ở ô trên. Với link public CSV/XLSX/XLS, hệ thống sẽ tự thử nhận diện tab/bảng có cột
                     keyword, volume và các cột ngày ranking.
                   </p>
+                  {sheetTestStatus?.message ? (
+                    <div
+                      className={`rounded-2xl border px-4 py-3 text-sm leading-6 ${
+                        sheetTestStatus.type === "error"
+                          ? "border-neon-red/40 bg-neon-red/10 text-neon-red"
+                          : sheetTestStatus.type === "success"
+                            ? "border-neon-cyan/40 bg-neon-cyan/10 text-neon-cyan"
+                            : "border-white/15 bg-white/[0.04] text-slate-200"
+                      }`}
+                    >
+                      {sheetTestStatus.message}
+                    </div>
+                  ) : null}
                 </div>
               </section>
 

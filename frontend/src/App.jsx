@@ -82,6 +82,7 @@ export default function App() {
   const [pageLoading, setPageLoading] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [testingSheet, setTestingSheet] = useState(false);
+  const [sheetTestStatus, setSheetTestStatus] = useState(null);
   const [savingSettings, setSavingSettings] = useState(false);
   const [creatingProject, setCreatingProject] = useState(false);
   const [generatingInsight, setGeneratingInsight] = useState(false);
@@ -491,16 +492,33 @@ export default function App() {
   async function handleTestSheet(sheetUrl, sheetGid = "") {
     if (!sheetUrl?.trim()) {
       setToast({ type: "error", message: "Vui lòng nhập link dữ liệu public." });
+      setSheetTestStatus({
+        type: "error",
+        message: "Thiếu link dữ liệu public.",
+      });
       return;
     }
     setTestingSheet(true);
+    setSheetTestStatus({
+      type: "loading",
+      message: "Đang kiểm tra kết nối. Với Google Sheets, bước này có thể mất 30-60 giây.",
+    });
     try {
       const response = await testGoogleSheet(token, sheetUrl, sheetGid);
+      const successMessage = `Kết nối thành công. Tìm thấy ${response.row_count} keyword, ${response.dates.length} mốc ngày${response.selected_sheet_name ? ` · tab: ${response.selected_sheet_name}` : ""}.`;
+      setSheetTestStatus({
+        type: "success",
+        message: `${successMessage} Nhấn “Lưu cài đặt” để ghi vào project hiện tại.`,
+      });
       setToast({
         type: "success",
-        message: `Kết nối thành công. Tìm thấy ${response.row_count} keyword, ${response.dates.length} mốc ngày${response.selected_sheet_name ? ` · tab: ${response.selected_sheet_name}` : ""}.`,
+        message: successMessage,
       });
     } catch (error) {
+      setSheetTestStatus({
+        type: "error",
+        message: error.message || "Không kiểm tra được kết nối.",
+      });
       setToast({ type: "error", message: error.message });
     } finally {
       setTestingSheet(false);
@@ -513,8 +531,16 @@ export default function App() {
     try {
       await updateSettings(token, selectedProjectId, form);
       await loadOverviewAndSettings(selectedProjectId);
+      setSheetTestStatus({
+        type: "success",
+        message: "Đã lưu cài đặt. Bấm “Refresh thủ công” ở header để kéo dữ liệu mới ngay.",
+      });
       setToast({ type: "success", message: "Đã lưu cài đặt." });
     } catch (error) {
+      setSheetTestStatus({
+        type: "error",
+        message: error.message || "Lưu cài đặt thất bại.",
+      });
       setToast({ type: "error", message: error.message });
     } finally {
       setSavingSettings(false);
@@ -740,7 +766,7 @@ export default function App() {
   return (
     <div className="min-h-screen px-4 py-4 lg:px-6">
       {toast ? (
-        <div className={`fixed left-1/2 top-5 z-50 -translate-x-1/2 rounded-full border px-5 py-3 text-sm font-semibold shadow-glow ${toast.type === "error" ? "border-neon-red/40 bg-neon-red/10 text-neon-red" : "border-neon-cyan/30 bg-neon-cyan/10 text-neon-cyan"}`}>
+        <div className={`fixed left-1/2 top-5 z-[70] -translate-x-1/2 rounded-full border px-5 py-3 text-sm font-semibold shadow-glow ${toast.type === "error" ? "border-neon-red/40 bg-neon-red/10 text-neon-red" : "border-neon-cyan/30 bg-neon-cyan/10 text-neon-cyan"}`}>
           {toast.message}
         </div>
       ) : null}
@@ -925,6 +951,7 @@ export default function App() {
         settings={settings}
         uploading={uploading}
         testingSheet={testingSheet}
+        sheetTestStatus={sheetTestStatus}
         saving={savingSettings}
         dragActive={dragActive}
         setDragActive={setDragActive}
