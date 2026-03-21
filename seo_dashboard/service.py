@@ -1018,13 +1018,14 @@ class DashboardService:
         name = (payload.get("name") or project["name"]).strip() or project["name"]
         sheet_gid = (payload.get("sheet_gid") or project.get("sheet_gid") or "").strip() or None
         source_type = project.get("source_type") or "upload"
+        # Do not run remote sheet validation on every save because it can be slow/unreliable.
+        # Validation is explicitly handled by the "Kiểm tra kết nối" action in UI.
         if sheet_url:
-            try:
-                test_result = self.test_google_sheet(sheet_url, sheet_gid)
-                sheet_gid = test_result.get("sheet_gid") or sheet_gid
-                source_type = test_result.get("source_type") or source_type
-            except Exception:
-                sheet_gid = project.get("sheet_gid")
+            normalized_sheet_url = sheet_url.lower()
+            if "docs.google.com/spreadsheets/" in normalized_sheet_url:
+                source_type = "google_sheet"
+            elif source_type == "upload":
+                source_type = "public_link"
         with transaction() as connection:
             connection.execute(
                 """
