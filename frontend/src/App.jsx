@@ -19,6 +19,7 @@ import {
   generateKeywordInsight,
   getGroupView,
   getKeywordDetail,
+  getRefreshStatus,
   getKeywordTable,
   getOverview,
   getProjects,
@@ -480,6 +481,24 @@ export default function App() {
     setPageLoading(true);
     try {
       await refreshProject(token, selectedProjectId);
+      const startedAt = Date.now();
+      let completed = false;
+      while (Date.now() - startedAt < 180000) {
+        await new Promise((resolve) => {
+          setTimeout(resolve, 2000);
+        });
+        const status = await getRefreshStatus(token, selectedProjectId);
+        if (status.status === "completed") {
+          completed = true;
+          break;
+        }
+        if (status.status === "failed") {
+          throw new Error(status.error || "Refresh thất bại.");
+        }
+      }
+      if (!completed) {
+        throw new Error("Hệ thống đang refresh lâu hơn bình thường. Vui lòng đợi thêm 1-2 phút rồi tải lại trang.");
+      }
       await loadOverviewAndSettings(selectedProjectId);
       setToast({ type: "success", message: "Đã refresh dữ liệu từ Google Sheets." });
     } catch (error) {

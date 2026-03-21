@@ -5,6 +5,7 @@ import json
 import os
 import re
 import secrets
+import threading
 import time
 from collections import Counter, defaultdict
 from datetime import datetime
@@ -312,6 +313,8 @@ class DashboardService:
             "off",
         }
         self.auto_backup_keep_days = max(3, int(os.getenv("AUTO_BACKUP_KEEP_DAYS", "30") or "30"))
+        self._refresh_jobs: dict[int, dict[str, Any]] = {}
+        self._refresh_jobs_lock = threading.Lock()
         self._ensure_seedless()
 
     def _ensure_seedless(self) -> None:
@@ -723,6 +726,91 @@ class DashboardService:
             "row_count": len(parsed.rows),
             "sheet_gid": gid,
             "source_type": source_type,
+        }
+
+    def trigger_google_sheet_refresh(self, project_id: int) -> dict[str, Any]:
+        project = self.get_project(project_id)
+        if not (project.get("sheet_url") or "").strip():
+            raise ValueError("Project chưa có Google Sheet URL.")
+
+        with self._refresh_jobs_lock:
+            existing = self._refresh_jobs.get(project_id)
+            if existing and existing.get("status") == "running":
+                return {
+                    "ok": True,
+                    "project_id": project_id,
+                    "status": "running",
+                    "started_at": existing.get("started_at"),
+                    "finished_at": None,
+                    "message": "Đang refresh dữ liệu. Vui lòng đợi hoàn tất.",
+                }
+            self._refresh_jobs[project_id] = {
+                "status": "running",
+                "project_id": project_id,
+                "started_at": now_iso(),
+                "finished_at": None,
+                "error": None,
+                "result": None,
+            }
+
+        def _runner() -> None:
+            try:
+                result = self.refresh_from_google_sheet(project_id)
+                with self._refresh_jobs_lock:
+                    job = self._refresh_jobs.get(project_id, {})
+                    job.update(
+                        {
+                            "status": "completed",
+                            "finished_at": now_iso(),
+                            "error": None,
+                            "result": result,
+                        }
+                    )
+                    self._refresh_jobs[project_id] = job
+            except Exception as exc:  # pragma: no cover - async thread safety
+                with self._refresh_jobs_lock:
+                    job = self._refresh_jobs.get(project_id, {})
+                    job.update(
+                        {
+                            "status": "failed",
+                            "finished_at": now_iso(),
+                            "error": str(exc),
+                        }
+                    )
+                    self._refresh_jobs[project_id] = job
+
+        threading.Thread(target=_runner, name=f"refresh-project-{project_id}", daemon=True).start()
+        return {
+            "ok": True,
+            "project_id": project_id,
+            "status": "running",
+            "started_at": self._refresh_jobs[project_id]["started_at"],
+            "finished_at": None,
+            "message": "Đã bắt đầu refresh dữ liệu. Hệ thống sẽ cập nhật khi hoàn tất.",
+        }
+
+    def get_google_sheet_refresh_status(self, project_id: int) -> dict[str, Any]:
+        self.get_project(project_id)
+        with self._refresh_jobs_lock:
+            job = dict(self._refresh_jobs.get(project_id) or {})
+        if not job:
+            return {
+                "ok": True,
+                "project_id": project_id,
+                "status": "idle",
+                "started_at": None,
+                "finished_at": None,
+                "error": None,
+                "result": None,
+            }
+        return {
+            "ok": True,
+            "project_id": project_id,
+            "status": job.get("status") or "idle",
+            "started_at": job.get("started_at"),
+            "finished_at": job.get("finished_at"),
+            "error": job.get("error"),
+            "result": job.get("result"),
         }
 
     def import_upload(self, project_id: int, filename: str, payload: bytes) -> dict[str, Any]:

@@ -114,6 +114,10 @@ export function refreshProject(token, projectId) {
   return request(`/api/projects/${projectId}/refresh`, { token, method: "POST" });
 }
 
+export function getRefreshStatus(token, projectId) {
+  return request(`/api/projects/${projectId}/refresh/status`, { token });
+}
+
 export function getOverview(token, projectId) {
   return request(`/api/projects/${projectId}/overview`, { token });
 }

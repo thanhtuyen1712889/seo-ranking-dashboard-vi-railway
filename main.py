@@ -190,7 +190,12 @@ async def upload_file(
 
 @app.post("/api/projects/{project_id}/refresh")
 def refresh_project(project_id: int, _: dict[str, Any] = Depends(require_auth)) -> dict[str, Any]:
-    return service.refresh_from_google_sheet(project_id)
+    return service.trigger_google_sheet_refresh(project_id)
+
+
+@app.get("/api/projects/{project_id}/refresh/status")
+def refresh_project_status(project_id: int, _: dict[str, Any] = Depends(require_auth)) -> dict[str, Any]:
+    return service.get_google_sheet_refresh_status(project_id)
 
 
 @app.get("/api/projects/{project_id}/overview")
