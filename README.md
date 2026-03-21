@@ -43,6 +43,7 @@ npm run build
 cd ..
 export DASHBOARD_PASSWORD=demo123
 export DATABASE_URL=sqlite:///./data/seo_dashboard.db
+export USE_REMOTE_DATABASE=false
 uvicorn main:app --reload
 ```
 
@@ -73,6 +74,7 @@ Mục tiêu: giảm tối đa rủi ro mất dữ liệu khi deploy/restart host
    - `TURSO_AUTH_TOKEN`
 
 ### 2. Set env trên host (Render/Railway)
+- `USE_REMOTE_DATABASE=true` (bật chế độ DB từ xa)
 - `DATABASE_URL=libsql://your-db-your-org.turso.io`
 - `TURSO_AUTH_TOKEN=...`
 - `TURSO_REPLICA_PATH=./data/turso-replica.db`

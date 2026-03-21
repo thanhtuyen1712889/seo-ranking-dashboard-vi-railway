@@ -17,6 +17,15 @@ DEFAULT_SQLITE_URL = "sqlite:////data/seo_dashboard.db" if Path("/data").exists(
 DEFAULT_DATABASE_URL = os.getenv("TURSO_DATABASE_URL", "").strip() or DEFAULT_SQLITE_URL
 
 
+def _is_truthy(value: str | None, *, default: bool = False) -> bool:
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if not normalized:
+        return default
+    return normalized in {"1", "true", "yes", "on"}
+
+
 class RowCompat:
     """Provide sqlite3.Row-like access for libsql tuple rows."""
 
@@ -156,6 +165,15 @@ def _resolve_sqlite_path(url: str) -> Path:
 
 
 def resolve_database_target(database_url: str | None = None) -> dict[str, Any]:
+    use_remote_database = _is_truthy(os.getenv("USE_REMOTE_DATABASE"), default=False)
+    if not use_remote_database:
+        local_url = (os.getenv("LOCAL_DATABASE_URL") or DEFAULT_SQLITE_URL).strip()
+        return {
+            "backend": "sqlite",
+            "url": local_url,
+            "sqlite_path": _resolve_sqlite_path(local_url),
+        }
+
     url = (database_url or os.getenv("DATABASE_URL") or DEFAULT_DATABASE_URL).strip()
     if url.startswith("sqlite:///"):
         return {
