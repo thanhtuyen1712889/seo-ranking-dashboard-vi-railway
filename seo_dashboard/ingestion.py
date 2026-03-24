@@ -29,7 +29,7 @@ VOLUME_ALIASES = [
 ]
 AVG_ALIASES = ["avg", "average", "avg ranking", "average ranking"]
 BEST_ALIASES = ["best rank", "best ranking", "best"]
-KPI_ALIASES = ["kpi", "target", "kpi target"]
+KPI_ALIASES = ["kpi", "kpi target", "target kpi", "kpi top"]
 DELTA_ALIASES = ["delta", "thay doi", "thay đổi", "change", "Δ"]
 TARGET_URL_ALIASES = ["url target", "target url"]
 FOUND_URL_ALIASES = ["url found", "landing url", "url"]
@@ -498,6 +498,11 @@ def parse_spreadsheet_payload(filename: str, payload: bytes, source_name: str | 
     volume_column = _best_header_match(headers, VOLUME_ALIASES)
     best_column = _best_header_match(headers, BEST_ALIASES)
     kpi_column = _best_header_match(headers, KPI_ALIASES)
+    if kpi_column:
+        normalized_kpi_header = normalize_label(kpi_column)
+        # Avoid false-positive matches such as "URL Target".
+        if "kpi" not in normalized_kpi_header and "top" not in normalized_kpi_header:
+            kpi_column = None
     target_url_column = _best_header_match(headers, TARGET_URL_ALIASES)
     found_url_column = _best_header_match(headers, FOUND_URL_ALIASES)
     date_columns = detect_date_columns(headers)
