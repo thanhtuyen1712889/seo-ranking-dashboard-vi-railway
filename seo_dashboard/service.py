@@ -1141,6 +1141,21 @@ class DashboardService:
                     )
                     imported_rankings += 1
 
+            if parsed.dates:
+                placeholders = ",".join("?" for _ in parsed.dates)
+                connection.execute(
+                    f"""
+                    DELETE FROM rankings
+                    WHERE keyword_id IN (
+                        SELECT id
+                        FROM keywords
+                        WHERE project_id = ?
+                    )
+                    AND rank_date NOT IN ({placeholders})
+                    """,
+                    (project_id, *parsed.dates),
+                )
+
             connection.execute(
                 """
                 UPDATE projects

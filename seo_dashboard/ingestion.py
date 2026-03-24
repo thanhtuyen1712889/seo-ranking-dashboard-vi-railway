@@ -62,7 +62,7 @@ class ParsedRankingRow:
     search_volume: int | None
     best_rank: float | None
     kpi_target: int | None
-    rankings: dict[str, float]
+    rankings: dict[str, float | None]
 
 
 @dataclass(slots=True)
@@ -297,7 +297,12 @@ def _parse_date_header(value: Any, *, dayfirst: bool) -> date | None:
 
 
 def detect_date_columns(columns: list[str]) -> list[tuple[str, str]]:
-    options: list[tuple[int, list[tuple[str, date]]]] = []
+    options: list[tuple[int, int, int, int, int, list[tuple[str, date]]]] = []
+    today = datetime.now().date()
+    has_explicit_year = any(
+        bool(re.search(r"\b\d{4}\b", clean_text(column)))
+        for column in columns
+    )
     for dayfirst in (True, False):
         detected: list[tuple[str, date]] = []
         penalty = 0
@@ -307,14 +312,45 @@ def detect_date_columns(columns: list[str]) -> list[tuple[str, str]]:
             if not parsed:
                 continue
             candidate = parsed
-            if previous and candidate < previous - timedelta(days=120) and re.search(r"^\d{1,2}[\/\-.]\d{1,2}$", str(column)):
-                candidate = date(previous.year + 1, candidate.month, candidate.day)
+            short_md_header = bool(re.fullmatch(r"\d{1,2}[\/\-.]\d{1,2}", clean_text(column)))
+            if short_md_header and previous:
+                candidate = date(previous.year, parsed.month, parsed.day)
+                if candidate < previous - timedelta(days=120):
+                    candidate = date(previous.year + 1, parsed.month, parsed.day)
+                elif candidate > previous + timedelta(days=320):
+                    candidate = date(previous.year - 1, parsed.month, parsed.day)
             if previous and candidate < previous:
                 penalty += 1
             detected.append((column, candidate))
             previous = candidate
-        options.append((penalty, detected))
-    best = min(options, key=lambda item: (item[0], -len(item[1])))[1]
+        if detected:
+            span_days = (detected[-1][1] - detected[0][1]).days
+            future_penalty = max(0, (detected[-1][1] - (today + timedelta(days=45))).days)
+        else:
+            span_days = 10**9
+            future_penalty = 10**9
+        # Prefer lower penalty, then less future drift, then smaller date span.
+        options.append(
+            (
+                penalty,
+                future_penalty,
+                span_days,
+                -len(detected),
+                0 if not dayfirst else 1,  # Prefer month/day on exact ties.
+                detected,
+            )
+        )
+    best = min(options, key=lambda item: item[:5])[5]
+    if best and not has_explicit_year:
+        # If the inferred dates are far in the future, shift the whole sequence back by whole years.
+        upper_bound = today + timedelta(days=45)
+        adjusted = best
+        while adjusted and adjusted[-1][1] > upper_bound:
+            adjusted = [
+                (column, date(parsed.year - 1, parsed.month, parsed.day))
+                for column, parsed in adjusted
+            ]
+        best = adjusted
     deduplicated: list[tuple[str, str]] = []
     seen: set[str] = set()
     for column, parsed in sorted(best, key=lambda item: item[1]):
@@ -480,15 +516,15 @@ def parse_spreadsheet_payload(filename: str, payload: bytes, source_name: str | 
         row_best_rank = parse_rank_value(record.get(best_column)) if best_column else None
         row_kpi = parse_kpi_target(record.get(kpi_column)) if kpi_column else None
         kpi_target = row_kpi or kpi_map.get(group_name) or 10
-        rankings: dict[str, float] = {}
+        rankings: dict[str, float | None] = {}
         for column_name, iso_date in date_columns:
             rank = parse_rank_value(record.get(column_name))
-            if rank is not None:
-                rankings[iso_date] = rank
-        if not rankings:
+            rankings[iso_date] = rank
+        if not any(rank is not None for rank in rankings.values()):
             warnings.append(f"Bỏ qua keyword '{keyword}' vì không có dữ liệu ngày.")
             continue
-        best_rank = row_best_rank or min(rankings.values())
+        rank_values = [rank for rank in rankings.values() if rank is not None]
+        best_rank = row_best_rank or min(rank_values)
         rows.append(
             ParsedRankingRow(
                 keyword=keyword,
