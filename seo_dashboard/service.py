@@ -1200,10 +1200,16 @@ class DashboardService:
             previous = None
             for row in rows:
                 current_position = row["position"]
-                if baseline is None:
+                if current_position is not None and baseline is None:
                     baseline = current_position
-                delta_prev = None if previous is None else round(float(current_position - previous), 2)
-                delta_baseline = None if baseline is None else round(float(current_position - baseline), 2)
+                if current_position is None or previous is None:
+                    delta_prev = None
+                else:
+                    delta_prev = round(float(current_position - previous), 2)
+                if current_position is None or baseline is None:
+                    delta_baseline = None
+                else:
+                    delta_baseline = round(float(current_position - baseline), 2)
                 connection.execute(
                     """
                     UPDATE rankings
