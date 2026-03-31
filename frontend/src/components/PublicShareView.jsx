@@ -21,6 +21,22 @@ function shareHeading(shareType, viewMode) {
   return viewMode === "team" ? "Cổng SEO riêng theo dự án" : "Cổng khách hàng riêng theo dự án";
 }
 
+function maskSensitiveProjectLabel(value, fallback = "Dự án đã chia sẻ") {
+  const raw = `${value || ""}`.trim();
+  if (!raw) return fallback;
+
+  const looksLikeRawUrl = /^(https?:\/\/|docs\.google\.com|www\.)/i.test(raw);
+  const cleaned = raw
+    .replace(/https?:\/\/\S+/gi, "")
+    .replace(/docs\.google\.com\/\S+/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (looksLikeRawUrl || !cleaned) return fallback;
+  if (cleaned.length > 90) return `${cleaned.slice(0, 87)}...`;
+  return cleaned;
+}
+
 export default function PublicShareView({ shareToken, shareType }) {
   const initialPublicToken = useMemo(() => {
     try {
@@ -210,6 +226,8 @@ export default function PublicShareView({ shareToken, shareType }) {
   const visibleTabs = (payload?.available_tabs || ["overview", "groups"]).filter(
     (tabId) => mode === "team" || tabId !== "keywords",
   );
+  const safeHeaderTitle = maskSensitiveProjectLabel(payload?.title || payload?.project_name, "Portal dự án");
+  const safeProjectName = maskSensitiveProjectLabel(payload?.project_name, "Dự án đã chia sẻ");
 
   useEffect(() => {
     if (mode !== "team" && activeTab === "keywords") {
@@ -273,7 +291,7 @@ export default function PublicShareView({ shareToken, shareType }) {
                   ⚡ SEO RANKING DASHBOARD
                 </p>
                 <h1 className="mt-3 font-display text-3xl font-bold text-white lg:text-4xl">
-                  {payload.title || payload.project_name}
+                  {safeHeaderTitle}
                 </h1>
                 <p className="mt-3 max-w-4xl text-sm leading-7 text-slate-300">
                   {payload.overview?.subtitle || "Portal này chỉ hiển thị đúng một dự án đã được chia sẻ."}
@@ -283,7 +301,7 @@ export default function PublicShareView({ shareToken, shareType }) {
               <div className="grid gap-3 sm:grid-cols-2 xl:w-[520px]">
                 <div className="rounded-[24px] border border-white/10 bg-black/10 px-4 py-3">
                   <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Dự án đang xem</p>
-                  <p className="mt-2 text-lg font-semibold text-white">{payload.project_name}</p>
+                  <p className="mt-2 text-lg font-semibold text-white">{safeProjectName}</p>
                 </div>
 
                 <div className="rounded-[24px] border border-white/10 bg-black/10 px-4 py-3">
