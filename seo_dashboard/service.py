@@ -1258,8 +1258,8 @@ class DashboardService:
                 else int(target_counter.most_common(1)[0][0]) if target_counter else parsed.kpi_map.get(group_name, 10)
             )
             target_keywords = (
-                parsed.target_keyword_map.get(group_name)
-                or (previous_cluster or {}).get("target_keywords")
+                (previous_cluster or {}).get("target_keywords")
+                or parsed.target_keyword_map.get(group_name)
                 or row["keyword_count"]
             )
             connection.execute(
@@ -1279,6 +1279,40 @@ class DashboardService:
                     target_keywords,
                 ),
             )
+
+    def _group_target_keyword_map(self, project_id: int) -> dict[str, int]:
+        with get_connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT group_name, target_keywords, keyword_count
+                FROM clusters
+                WHERE project_id = ?
+                """,
+                (project_id,),
+            ).fetchall()
+
+        grouped: dict[str, dict[str, Any]] = defaultdict(lambda: {"targets": [], "keyword_sum": 0})
+        for row in rows:
+            group_name = row["group_name"] or "Chưa phân nhóm"
+            target_value = int(row["target_keywords"] or 0)
+            keyword_count = int(row["keyword_count"] or 0)
+            grouped[group_name]["keyword_sum"] += keyword_count
+            if target_value > 0:
+                grouped[group_name]["targets"].append(target_value)
+
+        resolved: dict[str, int] = {}
+        for group_name, payload in grouped.items():
+            targets = payload["targets"]
+            keyword_sum = int(payload["keyword_sum"] or 0)
+            if not targets:
+                resolved[group_name] = keyword_sum
+                continue
+            unique_targets = set(targets)
+            if len(unique_targets) == 1:
+                resolved[group_name] = int(next(iter(unique_targets)))
+            else:
+                resolved[group_name] = int(sum(targets))
+        return resolved
 
     def update_project_settings(self, project_id: int, payload: dict[str, Any]) -> dict[str, Any]:
         project = self.get_project(project_id)
@@ -3340,15 +3374,19 @@ class DashboardService:
         latest_date = dates[-1]
         previous_date = dates[-2] if len(dates) >= 2 else None
         group_metrics = self._build_group_metrics(keywords, latest_date, previous_date)
+        group_target_map = self._group_target_keyword_map(project_id)
         group_names = sorted(group_metrics)
         kpi_chips = [
             {
                 "name": group_name,
                 "keyword_count": data["keyword_count"],
+                "target_keywords": int(group_target_map.get(group_name) or data["keyword_count"]),
                 "kpi_target": data["kpi_target"],
                 "achieved": data["achieved"],
-                "status": data["status"],
-                "label": f"{group_name} · {data['keyword_count']} KW · KPI Top{data['kpi_target']}",
+                "status": "đạt"
+                if data["achieved"] >= int(group_target_map.get(group_name) or data["keyword_count"])
+                else "chưa đạt",
+                "label": f"{group_name} · {int(group_target_map.get(group_name) or data['keyword_count'])} KW · KPI Top{data['kpi_target']}",
             }
             for group_name, data in group_metrics.items()
         ]
@@ -3357,27 +3395,30 @@ class DashboardService:
         if previous_date:
             prev_metrics = self._build_group_metrics(keywords, previous_date, dates[-3] if len(dates) >= 3 else None)
             achieved_prev = sum(data["achieved"] for data in prev_metrics.values())
+        total_target_keywords = sum(int(group_target_map.get(group_name) or data["keyword_count"]) for group_name, data in group_metrics.items())
+        total_target_keywords = total_target_keywords or len(keywords) or 1
         summary_cards = [
             {
                 "name": "Tổng keyword",
                 "value": len(keywords),
-                "kpi_target": sum(data["keyword_count"] for data in group_metrics.values()),
+                "kpi_target": total_target_keywords,
                 "achieved": achieved_latest,
-                "percent": round((achieved_latest / len(keywords)) * 100, 1) if keywords else 0,
+                "percent": round((achieved_latest / total_target_keywords) * 100, 1),
                 "trend": achieved_latest - achieved_prev if previous_date else 0,
             }
         ]
         for group_name in group_names[:3]:
             data = group_metrics[group_name]
+            target_keywords = int(group_target_map.get(group_name) or data["keyword_count"] or 1)
             summary_cards.append(
                 {
                     "name": group_name,
                     "value": data["achieved"],
-                    "kpi_target": data["keyword_count"],
-                    "percent": data["percent"],
+                    "kpi_target": target_keywords,
+                    "percent": round((data["achieved"] / target_keywords) * 100, 1) if target_keywords else 0,
                     "trend": data["avg_delta"],
                     "threshold": data["kpi_target"],
-                    "subtitle": f"{data['achieved']}/{data['keyword_count']} đạt",
+                    "subtitle": f"{data['achieved']}/{target_keywords} đạt",
                 }
             )
 
@@ -3415,7 +3456,19 @@ class DashboardService:
                 distribution_buckets["Top 21+"] += 1
 
         donut = [
-            {"name": group_name, "value": data["percent"], "achieved": data["achieved"], "total": data["keyword_count"]}
+            {
+                "name": group_name,
+                "value": round(
+                    (
+                        data["achieved"]
+                        / max(1, int(group_target_map.get(group_name) or data["keyword_count"] or 1))
+                    )
+                    * 100,
+                    1,
+                ),
+                "achieved": data["achieved"],
+                "total": int(group_target_map.get(group_name) or data["keyword_count"]),
+            }
             for group_name, data in group_metrics.items()
         ]
         avg_trend = [
