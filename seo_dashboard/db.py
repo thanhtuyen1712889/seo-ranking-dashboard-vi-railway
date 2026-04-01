@@ -335,6 +335,7 @@ def init_db() -> None:
                 password_hash TEXT,
                 state_json TEXT NOT NULL,
                 snapshot_json TEXT,
+                expires_at TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
@@ -378,6 +379,7 @@ def init_db() -> None:
         _ensure_column(connection, "clusters", "target_keywords", "target_keywords INTEGER DEFAULT 0")
         _ensure_column(connection, "events", "is_manual", "is_manual INTEGER DEFAULT 0")
         _ensure_column(connection, "ai_insights", "cluster_name", "cluster_name TEXT")
+        _ensure_column(connection, "shared_views", "expires_at", "expires_at TEXT")
         _ensure_column(connection, "ai_insights", "keyword", "keyword TEXT")
         _ensure_column(connection, "ai_insights", "range_end", "range_end TEXT")
         _ensure_column(connection, "ai_insights", "author", "author TEXT DEFAULT 'AI'")

@@ -755,7 +755,11 @@ export default function App() {
         seo_view_url: response.seo_view_url || previous.seo_view_url,
         seo_view_password: response.seo_view_password || "",
       }));
-      setToast({ type: "success", message: "Đã tạo link SEO riêng cho project này." });
+      if (response.reused_active_link) {
+        setToast({ type: "success", message: "Link Team SEO đang trong chu kỳ 24h nên giữ nguyên link cũ (dữ liệu snapshot vẫn cố định)." });
+      } else {
+        setToast({ type: "success", message: "Đã tạo link Team SEO dạng snapshot tương tác (hiệu lực 24h)." });
+      }
       const refreshedGroupView = await getGroupView(token, selectedProjectId, groupFilters);
       setGroupView(refreshedGroupView);
     } catch (error) {

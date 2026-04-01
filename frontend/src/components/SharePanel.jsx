@@ -44,7 +44,7 @@ export default function SharePanel({
         <div className="max-w-3xl">
           <p className="text-sm font-semibold text-white">Chia sẻ snapshot cho khách</p>
           <p className="mt-1 text-sm leading-7 text-slate-400">
-            Link Khách và SEO đều chỉ mở đúng project hiện tại, không thấy project khác. Link report sẽ đóng băng insight, cụm và health score tại thời điểm bạn bấm xuất report.
+            Link Khách và SEO đều chỉ mở đúng project hiện tại, không thấy project khác. Link SEO được đóng băng dữ liệu tương tác và giữ ổn định 24 giờ; link report cũng đóng băng snapshot tại thời điểm bấm xuất.
           </p>
         </div>
         <div className="grid w-full gap-3 xl:max-w-[920px] xl:grid-cols-[1.2fr,1fr,auto,auto,auto]">
@@ -110,7 +110,7 @@ export default function SharePanel({
             </button>
           </div>
           <p className="mt-2 text-sm text-slate-400">
-            {latestSeoPassword ? `Mật khẩu vừa tạo: ${latestSeoPassword}` : "Link này mở full dashboard của đúng project ở chế độ Team SEO, không lộ project khác."}
+            {latestSeoPassword ? `Mật khẩu vừa tạo: ${latestSeoPassword}` : "Link Team SEO đóng băng dữ liệu, vẫn dùng được tab Chi Tiết Keyword và giữ ổn định trong 24 giờ."}
           </p>
         </div>
 

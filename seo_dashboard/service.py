@@ -8,7 +8,7 @@ import secrets
 import threading
 import time
 from collections import Counter, defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta
 from math import log
 from statistics import mean
 from typing import Any
@@ -315,6 +315,7 @@ class DashboardService:
             "off",
         }
         self.auto_backup_keep_days = max(3, int(os.getenv("AUTO_BACKUP_KEEP_DAYS", "30") or "30"))
+        self.seo_share_ttl_hours = max(1, int(os.getenv("SEO_SHARE_TTL_HOURS", "24") or "24"))
         self._refresh_jobs: dict[int, dict[str, Any]] = {}
         self._refresh_jobs_lock = threading.Lock()
         self._project_refresh_locks: dict[int, threading.Lock] = {}
@@ -333,6 +334,43 @@ class DashboardService:
             return json.loads(value)
         except (TypeError, json.JSONDecodeError):
             return fallback
+
+    def _parse_iso_datetime(self, value: str | None) -> datetime | None:
+        if not value:
+            return None
+        try:
+            return parse_iso_date(str(value))
+        except (TypeError, ValueError):
+            return None
+
+    def _share_expiry_for_ttl(self, ttl_hours: int | None) -> str | None:
+        if ttl_hours is None:
+            return None
+        hours = max(1, int(ttl_hours))
+        return (datetime.now() + timedelta(hours=hours)).isoformat(timespec="seconds")
+
+    def _is_share_expired(self, share: dict[str, Any]) -> bool:
+        expires_at = self._parse_iso_datetime(share.get("expires_at"))
+        if expires_at is None:
+            return False
+        return expires_at <= datetime.now()
+
+    def _latest_active_share_by_type(self, project_id: int, share_type: str) -> dict[str, Any] | None:
+        with get_connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT *
+                FROM shared_views
+                WHERE project_id = ? AND share_type = ?
+                ORDER BY updated_at DESC, id DESC
+                """,
+                (project_id, share_type),
+            ).fetchall()
+        for row in rows:
+            share = self._share_payload(row)
+            if not share.get("is_expired"):
+                return share
+        return None
 
     def _project_payload(self, row: Any) -> dict[str, Any]:
         project = dict(row)
@@ -448,13 +486,14 @@ class DashboardService:
         share["state_json"] = self._load_json_blob(share.get("state_json"), {})
         share["snapshot_json"] = self._load_json_blob(share.get("snapshot_json"), None)
         share["url"] = self._share_url(share["share_type"], share["share_token"])
+        share["is_expired"] = self._is_share_expired(share)
         return share
 
     def _latest_share_links(self, project_id: int) -> dict[str, str | None]:
         with get_connection() as connection:
             rows = connection.execute(
                 """
-                SELECT share_type, share_token
+                SELECT share_type, share_token, expires_at
                 FROM shared_views
                 WHERE project_id = ?
                 ORDER BY updated_at DESC, id DESC
@@ -468,6 +507,8 @@ class DashboardService:
         }
         for row in rows:
             share_type = row["share_type"]
+            if self._is_share_expired(dict(row)):
+                continue
             if share_type == "client_view" and not latest["client_view_url"]:
                 latest["client_view_url"] = self._share_url(share_type, row["share_token"])
             if share_type == "seo_view" and not latest["seo_view_url"]:
@@ -1421,7 +1462,10 @@ class DashboardService:
             ).fetchone()
         if not row:
             raise ValueError("Không tìm thấy link chia sẻ.")
-        return self._share_payload(row)
+        share = self._share_payload(row)
+        if share.get("is_expired"):
+            raise ValueError("Link Team SEO đã hết hạn sau 24 giờ. Vui lòng tạo link mới.")
+        return share
 
     def _share_state_payload(
         self,
@@ -1462,12 +1506,20 @@ class DashboardService:
             if self._public_view_mode("report_snapshot", view_state) == "team"
             else None
         )
+        keyword_details = {}
+        if keyword_table is not None:
+            for row in keyword_table.get("rows", []):
+                keyword_id = int(row.get("id") or 0)
+                if keyword_id <= 0:
+                    continue
+                keyword_details[str(keyword_id)] = self.get_keyword_detail(project_id, keyword_id)
         return {
             "project": self._safe_public_project(self.get_project(project_id)),
             "overview": overview,
             "view_state": view_state,
             "group_views": scenario_views,
             "keyword_table": keyword_table,
+            "keyword_details": keyword_details,
             "created_at": now_iso(),
         }
 
@@ -1479,6 +1531,9 @@ class DashboardService:
         title: str | None = None,
         password: str | None = None,
         state: dict[str, Any] | None = None,
+        freeze_snapshot: bool = False,
+        ttl_hours: int | None = None,
+        reuse_active: bool = False,
     ) -> dict[str, Any]:
         project = self.get_project(project_id)
         view_state = self._share_state_payload(project_id, state)
@@ -1488,12 +1543,44 @@ class DashboardService:
                 view_state["active_tab"] = "overview"
         elif share_type == "seo_view":
             view_state["mode"] = "team"
+        resolved_password = (password or "").strip()
+        resolved_title = (title or "").strip()
+
+        if reuse_active:
+            existing = self._latest_active_share_by_type(project_id, share_type)
+            if existing:
+                existing_title = (existing.get("title") or "").strip()
+                existing_password_hash = existing.get("password_hash")
+                incoming_password_hash = hash_view_password(resolved_password) if resolved_password else None
+                title_compatible = not resolved_title or resolved_title == existing_title
+                password_compatible = (
+                    (not resolved_password and not existing_password_hash)
+                    or (resolved_password and incoming_password_hash == existing_password_hash)
+                )
+                if title_compatible and password_compatible:
+                    links = self._latest_share_links(project_id)
+                    return {
+                        "project_id": str(project_id),
+                        "share_type": share_type,
+                        "title": existing["title"],
+                        "client_view_url": links["client_view_url"],
+                        "client_view_password": None,
+                        "seo_view_url": existing["url"] if share_type == "seo_view" else links["seo_view_url"],
+                        "seo_view_password": (resolved_password or None) if share_type == "seo_view" else None,
+                        "report_snapshot_url": links["report_snapshot_url"],
+                        "created_at": existing["created_at"],
+                        "expires_at": existing.get("expires_at"),
+                        "is_snapshot": bool(existing.get("snapshot_json")),
+                        "reused_active_link": True,
+                        "active_scenario_id": view_state.get("group_filters", {}).get("active_scenario_id") or None,
+                    }
+
         snapshot_json = None
-        if share_type == "report_snapshot":
+        if share_type == "report_snapshot" or freeze_snapshot:
             snapshot_json = self._build_snapshot_bundle(project_id, view_state)
         share_token = secrets.token_urlsafe(18)
         current_time = now_iso()
-        resolved_password = (password or "").strip()
+        expires_at = self._share_expiry_for_ttl(ttl_hours)
         default_titles = {
             "client_view": f"{project['name']} · Cổng khách hàng",
             "seo_view": f"{project['name']} · Cổng SEO",
@@ -1504,18 +1591,19 @@ class DashboardService:
                 """
                 INSERT INTO shared_views (
                     project_id, share_type, share_token, title, password_hash,
-                    state_json, snapshot_json, created_at, updated_at
+                    state_json, snapshot_json, expires_at, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     project_id,
                     share_type,
                     share_token,
-                    (title or "").strip() or default_titles.get(share_type, f"{project['name']} · Link chia sẻ"),
+                    resolved_title or default_titles.get(share_type, f"{project['name']} · Link chia sẻ"),
                     hash_view_password(resolved_password) if resolved_password else None,
                     json.dumps(view_state, ensure_ascii=True),
                     json.dumps(snapshot_json, ensure_ascii=True) if snapshot_json is not None else None,
+                    expires_at,
                     current_time,
                     current_time,
                 ),
@@ -1525,16 +1613,20 @@ class DashboardService:
                 (int(cursor.lastrowid),),
             ).fetchone()
         share = self._share_payload(row)
+        links = self._latest_share_links(project_id)
         return {
             "project_id": str(project_id),
             "share_type": share_type,
             "title": share["title"],
-            "client_view_url": share["url"] if share_type == "client_view" else self._latest_share_links(project_id)["client_view_url"],
+            "client_view_url": share["url"] if share_type == "client_view" else links["client_view_url"],
             "client_view_password": (resolved_password or None) if share_type == "client_view" else None,
-            "seo_view_url": share["url"] if share_type == "seo_view" else self._latest_share_links(project_id)["seo_view_url"],
+            "seo_view_url": share["url"] if share_type == "seo_view" else links["seo_view_url"],
             "seo_view_password": (resolved_password or None) if share_type == "seo_view" else None,
-            "report_snapshot_url": share["url"] if share_type == "report_snapshot" else self._latest_share_links(project_id)["report_snapshot_url"],
+            "report_snapshot_url": share["url"] if share_type == "report_snapshot" else links["report_snapshot_url"],
             "created_at": share["created_at"],
+            "expires_at": share.get("expires_at"),
+            "is_snapshot": bool(share.get("snapshot_json")),
+            "reused_active_link": False,
             "active_scenario_id": view_state.get("group_filters", {}).get("active_scenario_id") or None,
         }
 
@@ -1548,12 +1640,20 @@ class DashboardService:
         )
 
     def create_seo_view_share(self, project_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+        ttl_hours = payload.get("ttl_hours")
+        try:
+            ttl_hours_value = int(ttl_hours) if ttl_hours is not None else self.seo_share_ttl_hours
+        except (TypeError, ValueError):
+            ttl_hours_value = self.seo_share_ttl_hours
         return self._create_share(
             project_id,
             share_type="seo_view",
             title=payload.get("title"),
             password=payload.get("password"),
             state=payload.get("state"),
+            freeze_snapshot=True,
+            ttl_hours=max(1, ttl_hours_value),
+            reuse_active=True,
         )
 
     def create_report_snapshot_share(self, project_id: int, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1595,6 +1695,169 @@ class DashboardService:
                 "mode": view_mode,
             },
             "snapshot_created_at": share["created_at"],
+            "share_expires_at": share.get("expires_at"),
+            "is_frozen_snapshot": bool(share.get("snapshot_json")),
+        }
+
+    def _history_position_from_map(self, positions: dict[str, Any], rank_date: str | None) -> float | None:
+        if not rank_date:
+            return None
+        value = positions.get(rank_date)
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _history_previous_position_from_map(self, positions: dict[str, Any], dates: list[str], rank_date: str | None) -> float | None:
+        if not rank_date or rank_date not in dates:
+            return None
+        index = dates.index(rank_date)
+        if index <= 0:
+            return None
+        previous_date = dates[index - 1]
+        return self._history_position_from_map(positions, previous_date)
+
+    def _snapshot_keyword_status_tags(
+        self,
+        row: dict[str, Any],
+        *,
+        dates: list[str],
+        current_date: str | None,
+    ) -> set[str]:
+        tags: set[str] = set()
+        positions = row.get("positions") or {}
+        current_rank = self._history_position_from_map(positions, current_date)
+        previous_rank = self._history_previous_position_from_map(positions, dates, current_date)
+        kpi_target = int(row.get("kpi_target") or 10)
+
+        if current_rank is not None and current_rank <= kpi_target:
+            tags.add("kpi_met")
+        if current_rank is not None and current_rank >= 101:
+            tags.add("lost")
+        if previous_rank is not None and current_rank is not None:
+            delta = current_rank - previous_rank
+            if abs(delta) <= 1:
+                tags.add("stable")
+            elif delta < 0:
+                tags.add("up")
+            else:
+                tags.add("down")
+        elif row.get("status_tags"):
+            tags.update(row.get("status_tags") or [])
+        return tags
+
+    def _apply_snapshot_keyword_filters(
+        self,
+        keyword_table: dict[str, Any] | None,
+        keyword_filters: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if keyword_table is None:
+            return None
+        filters = keyword_filters or {}
+        dates = keyword_table.get("dates") or []
+        default_current_date = keyword_table.get("current_date") or (dates[-1] if dates else None)
+        current_date = (filters.get("current_date") or default_current_date) if dates else None
+        if current_date not in dates and dates:
+            current_date = default_current_date
+
+        search = str(filters.get("search") or "").strip().lower()
+        groups_filter = {item for item in str(filters.get("groups") or "").split(",") if item}
+        clusters_filter = {item for item in str(filters.get("clusters") or "").split(",") if item}
+        status_filter = str(filters.get("status") or "all").strip()
+        sort_by_raw = str(filters.get("sort_by") or keyword_table.get("sort_by") or "current_rank").strip()
+        sort_dir = "desc" if str(filters.get("sort_dir") or keyword_table.get("sort_dir") or "asc").strip().lower() == "desc" else "asc"
+        vol_min = int(filters.get("vol_min") or 0)
+        vol_max = int(filters.get("vol_max") or 1000000)
+        rank_min = float(filters.get("rank_min") or 0)
+        rank_max = float(filters.get("rank_max") or 101)
+        movers_only = str(filters.get("movers_only") or "").lower() in {"1", "true", "yes"}
+
+        rows = []
+        for base_row in keyword_table.get("rows", []):
+            row = dict(base_row)
+            positions = row.get("positions") or {}
+            current_rank = self._history_position_from_map(positions, current_date)
+            if current_rank is None:
+                continue
+            previous_rank = self._history_previous_position_from_map(positions, dates, current_date)
+            delta_prev = None if previous_rank is None else round(float(current_rank - previous_rank), 2)
+            status_tags = self._snapshot_keyword_status_tags(row, dates=dates, current_date=current_date)
+
+            keyword_text = str(row.get("keyword") or "").lower()
+            group_name = row.get("group_name") or "Chưa phân nhóm"
+            cluster_name = row.get("cluster_name") or group_name
+            search_volume = row.get("search_volume")
+
+            if search and search not in keyword_text:
+                continue
+            if groups_filter and group_name not in groups_filter:
+                continue
+            if clusters_filter and cluster_name not in clusters_filter:
+                continue
+            if status_filter != "all" and status_filter not in status_tags:
+                continue
+            if search_volume is not None and not (vol_min <= int(search_volume) <= vol_max):
+                continue
+            if not (rank_min <= current_rank <= rank_max):
+                continue
+            if movers_only and (delta_prev is None or abs(delta_prev) < 5):
+                continue
+
+            row["current_rank"] = current_rank
+            row["delta_prev"] = delta_prev
+            row["status_tags"] = sorted(status_tags)
+            row["kpi_status"] = "Đạt KPI" if current_rank <= int(row.get("kpi_target") or 10) else "Chưa đạt"
+            row["client_badge"] = client_rank_badge(current_rank)
+            rows.append(row)
+
+        sortable_fields = {
+            "index",
+            "group_name",
+            "cluster_name",
+            "keyword",
+            "search_volume",
+            "best_rank",
+            "current_rank",
+            "delta_prev",
+            "kpi_status",
+        }
+        sort_date = None
+        if sort_by_raw.startswith("date:"):
+            candidate = sort_by_raw.split(":", 1)[1]
+            if candidate in dates:
+                sort_date = candidate
+                sort_by = f"date:{candidate}"
+            else:
+                sort_by = "current_rank"
+        elif sort_by_raw in sortable_fields:
+            sort_by = sort_by_raw
+        else:
+            sort_by = "current_rank"
+
+        def _sort_value(item: dict[str, Any]) -> Any:
+            if sort_date:
+                value = (item.get("positions") or {}).get(sort_date)
+            else:
+                value = item.get(sort_by)
+            if isinstance(value, str):
+                return value.lower()
+            return value
+
+        non_missing = [item for item in rows if _sort_value(item) is not None]
+        missing = [item for item in rows if _sort_value(item) is None]
+        non_missing.sort(key=_sort_value, reverse=sort_dir == "desc")
+        rows = non_missing + missing
+
+        return {
+            "dates": dates,
+            "rows": rows,
+            "groups": sorted({row["group_name"] for row in rows}),
+            "clusters": sorted({row["cluster_name"] for row in rows}),
+            "current_date": current_date,
+            "sort_by": sort_by,
+            "sort_dir": sort_dir,
         }
 
     def _build_public_live_payload(
@@ -1644,6 +1907,7 @@ class DashboardService:
         share: dict[str, Any],
         *,
         active_scenario_id: str | None = None,
+        keyword_filters: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         snapshot = share.get("snapshot_json") or {}
         view_state = self._normalize_view_state(snapshot.get("view_state") or share.get("state_json"))
@@ -1654,7 +1918,7 @@ class DashboardService:
             selected_group_view = group_views.get(requested_scenario_id)
         if selected_group_view is None and group_views:
             selected_group_view = next(iter(group_views.values()))
-        keyword_table = snapshot.get("keyword_table")
+        keyword_table = self._apply_snapshot_keyword_filters(snapshot.get("keyword_table"), keyword_filters)
         if self._public_view_mode(share["share_type"], view_state) != "team":
             keyword_table = None
         payload = self._public_payload_base(share, view_state, keyword_table)
@@ -1689,7 +1953,9 @@ class DashboardService:
                     "title": share["title"],
                     "project_id": str(share["project_id"]),
                 }
-        if share["share_type"] == "report_snapshot":
+        if share["share_type"] == "report_snapshot" or (
+            share["share_type"] == "seo_view" and share.get("snapshot_json")
+        ):
             requested_scenario_id = (
                 (group_filters or {}).get("active_scenario_id")
                 or (group_filters or {}).get("sub_cluster_mode")
@@ -1698,6 +1964,7 @@ class DashboardService:
             return self._build_public_snapshot_payload(
                 share,
                 active_scenario_id=requested_scenario_id,
+                keyword_filters=keyword_filters,
             )
         return self._build_public_live_payload(
             share,
@@ -1717,6 +1984,13 @@ class DashboardService:
             raise ValueError("Link này không hỗ trợ mở chi tiết keyword.")
         if share.get("password_hash"):
             verify_public_view_token(public_token or "", share_token)
+        if share.get("snapshot_json"):
+            snapshot = share.get("snapshot_json") or {}
+            keyword_details = snapshot.get("keyword_details") or {}
+            detail = keyword_details.get(str(keyword_id))
+            if detail:
+                return detail
+            raise ValueError("Keyword này không nằm trong snapshot Team SEO đã đóng băng.")
         return self.get_keyword_detail(share["project_id"], keyword_id)
 
     def recluster_keywords(self, project_id: int) -> dict[str, Any]:
