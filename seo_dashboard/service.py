@@ -1483,24 +1483,39 @@ class DashboardService:
             project_id,
             current_date=group_filters.get("current_date") or None,
             baseline_date=group_filters.get("baseline_date") or None,
-            status_filter=group_filters.get("status") or "all",
+            status_filter="all",
             main_cluster=group_filters.get("main_cluster") or None,
-            tag_filter=group_filters.get("tag") or "all",
-            sort_by=group_filters.get("sort_by") or "health_score",
+            tag_filter="all",
+            sort_by="health_score",
             active_scenario_id=group_filters.get("active_scenario_id") or None,
         )
         scenario_views = {}
+        main_clusters = base_group_view.get("main_clusters", []) or []
         for scenario in base_group_view.get("scenarios", []):
-            scenario_views[scenario["scenario_id"]] = self.get_group_view(
-                project_id,
-                current_date=group_filters.get("current_date") or None,
-                baseline_date=group_filters.get("baseline_date") or None,
-                status_filter=group_filters.get("status") or "all",
-                main_cluster=group_filters.get("main_cluster") or None,
-                tag_filter=group_filters.get("tag") or "all",
-                sort_by=group_filters.get("sort_by") or "health_score",
-                active_scenario_id=scenario["scenario_id"],
-            )
+            per_group_views: dict[str, dict[str, Any]] = {}
+            for cluster_name in main_clusters:
+                per_group_views[cluster_name] = self.get_group_view(
+                    project_id,
+                    current_date=group_filters.get("current_date") or None,
+                    baseline_date=group_filters.get("baseline_date") or None,
+                    status_filter="all",
+                    main_cluster=cluster_name,
+                    tag_filter="all",
+                    sort_by="health_score",
+                    active_scenario_id=scenario["scenario_id"],
+                )
+            if not per_group_views:
+                per_group_views["__default__"] = self.get_group_view(
+                    project_id,
+                    current_date=group_filters.get("current_date") or None,
+                    baseline_date=group_filters.get("baseline_date") or None,
+                    status_filter="all",
+                    main_cluster=group_filters.get("main_cluster") or None,
+                    tag_filter="all",
+                    sort_by="health_score",
+                    active_scenario_id=scenario["scenario_id"],
+                )
+            scenario_views[scenario["scenario_id"]] = per_group_views
         keyword_table = (
             self.get_keyword_table(project_id, keyword_filters)
             if self._public_view_mode("report_snapshot", view_state) == "team"
@@ -1860,6 +1875,60 @@ class DashboardService:
             "sort_dir": sort_dir,
         }
 
+    def _apply_snapshot_group_filters(
+        self,
+        group_view: dict[str, Any] | None,
+        group_filters: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if not group_view:
+            return None
+        filters = group_filters or {}
+        status_filter = str(filters.get("status") or "all").strip()
+        tag_filter = str(filters.get("tag") or "all").strip()
+        sort_by = str(filters.get("sort_by") or "health_score").strip()
+
+        view = json.loads(json.dumps(group_view, ensure_ascii=True))
+        cluster_list = view.get("cluster_list") or []
+        drilldown_tables = view.get("drilldown_tables") or []
+
+        if tag_filter != "all":
+            cluster_list = [cluster for cluster in cluster_list if tag_filter in (cluster.get("tags") or [])]
+        if status_filter != "all":
+            cluster_list = [cluster for cluster in cluster_list if cluster.get("trend_status") == status_filter]
+
+        sort_field, descending = CLUSTER_SORTS.get(sort_by, CLUSTER_SORTS["health_score"])
+        cluster_list.sort(
+            key=lambda item: (item.get(sort_field) is None, item.get(sort_field, 0)),
+            reverse=descending,
+        )
+
+        allowed_cluster_ids = {cluster.get("cluster_id") for cluster in cluster_list}
+        drilldown_tables = [
+            table
+            for table in drilldown_tables
+            if table.get("cluster_id") in allowed_cluster_ids
+        ]
+
+        selected_cluster = cluster_list[0] if cluster_list else None
+        trend_panel = {
+            "selected_cluster_id": selected_cluster.get("cluster_id") if selected_cluster else None,
+            "kpis": {
+                "total_volume": selected_cluster.get("total_volume", 0) if selected_cluster else 0,
+                "avg_rank_current": selected_cluster.get("avg_rank_current", 0) if selected_cluster else 0,
+                "rank_delta": selected_cluster.get("rank_delta", 0) if selected_cluster else 0,
+                "health_score": selected_cluster.get("health_score", 0) if selected_cluster else 0,
+                "trend_status": selected_cluster.get("trend_status", "stable") if selected_cluster else "stable",
+            },
+            "sparkline": selected_cluster.get("sparkline") if selected_cluster else {"metric": "avg_rank", "time_range": "last_30_days", "points": [], "delta_vs_previous_period": 0},
+            "top_keywords_table": selected_cluster.get("top_keywords") if selected_cluster else [],
+            "insight_note": selected_cluster.get("insight_note") if selected_cluster else "Chưa có cụm phù hợp với bộ lọc hiện tại.",
+        }
+
+        view["cluster_list"] = cluster_list
+        view["drilldown_tables"] = drilldown_tables
+        view["trend_panel"] = trend_panel
+        return view
+
     def _build_public_live_payload(
         self,
         share: dict[str, Any],
@@ -1907,17 +1976,61 @@ class DashboardService:
         share: dict[str, Any],
         *,
         active_scenario_id: str | None = None,
+        group_filters: dict[str, Any] | None = None,
         keyword_filters: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         snapshot = share.get("snapshot_json") or {}
-        view_state = self._normalize_view_state(snapshot.get("view_state") or share.get("state_json"))
+        view_state = self._merge_view_state(
+            snapshot.get("view_state") or share.get("state_json"),
+            {
+                "group_filters": group_filters or {},
+                "keyword_filters": keyword_filters or {},
+            },
+        )
         group_views = snapshot.get("group_views") or {}
-        requested_scenario_id = active_scenario_id or view_state.get("group_filters", {}).get("active_scenario_id")
+        legacy_snapshot_layout = False
+        current_group_filters = view_state.get("group_filters") or {}
+        requested_scenario_id = active_scenario_id or current_group_filters.get("active_scenario_id")
+        requested_main_cluster = current_group_filters.get("main_cluster") or None
         selected_group_view = None
         if requested_scenario_id:
-            selected_group_view = group_views.get(requested_scenario_id)
+            scenario_entry = group_views.get(requested_scenario_id)
+            if isinstance(scenario_entry, dict) and "cluster_list" in scenario_entry:
+                legacy_snapshot_layout = True
+                selected_group_view = scenario_entry
+            elif isinstance(scenario_entry, dict):
+                if requested_main_cluster and requested_main_cluster in scenario_entry:
+                    selected_group_view = scenario_entry.get(requested_main_cluster)
+                if selected_group_view is None and scenario_entry:
+                    selected_group_view = next(iter(scenario_entry.values()))
         if selected_group_view is None and group_views:
-            selected_group_view = next(iter(group_views.values()))
+            first_scenario_entry = next(iter(group_views.values()))
+            if isinstance(first_scenario_entry, dict) and "cluster_list" in first_scenario_entry:
+                legacy_snapshot_layout = True
+                selected_group_view = first_scenario_entry
+            elif isinstance(first_scenario_entry, dict) and first_scenario_entry:
+                if requested_main_cluster and requested_main_cluster in first_scenario_entry:
+                    selected_group_view = first_scenario_entry.get(requested_main_cluster)
+                if selected_group_view is None:
+                    selected_group_view = next(iter(first_scenario_entry.values()))
+        if (
+            selected_group_view
+            and legacy_snapshot_layout
+            and requested_main_cluster
+            and selected_group_view.get("selected_main_cluster") != requested_main_cluster
+            and share.get("share_type") == "seo_view"
+        ):
+            selected_group_view = self.get_group_view(
+                share["project_id"],
+                current_date=current_group_filters.get("current_date") or selected_group_view.get("current_date") or None,
+                baseline_date=current_group_filters.get("baseline_date") or selected_group_view.get("baseline_date") or None,
+                status_filter="all",
+                main_cluster=requested_main_cluster,
+                tag_filter="all",
+                sort_by="health_score",
+                active_scenario_id=requested_scenario_id,
+            )
+        selected_group_view = self._apply_snapshot_group_filters(selected_group_view, current_group_filters)
         keyword_table = self._apply_snapshot_keyword_filters(snapshot.get("keyword_table"), keyword_filters)
         if self._public_view_mode(share["share_type"], view_state) != "team":
             keyword_table = None
@@ -1964,6 +2077,7 @@ class DashboardService:
             return self._build_public_snapshot_payload(
                 share,
                 active_scenario_id=requested_scenario_id,
+                group_filters=group_filters,
                 keyword_filters=keyword_filters,
             )
         return self._build_public_live_payload(
