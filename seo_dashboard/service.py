@@ -2737,6 +2737,12 @@ class DashboardService:
             "overall_summary": context.get("overall_summary") or {},
             "seo_input": seo_input.strip() or None,
         }
+        group_templates = context["groups"][:6]
+        group_template_lines = (
+            "\n".join(f"- **{group['name']}**: ..." for group in group_templates)
+            if group_templates
+            else "- ..."
+        )
         prompt = (
             "Bạn là SEO analyst đang đọc dữ liệu từ dashboard SEO.\n"
             f"Dữ liệu hiện tại: {data_payload}\n"
@@ -2746,14 +2752,10 @@ class DashboardService:
             "- ...\n"
             "\n"
             "**Các điểm sáng**\n"
-            "- **B2B**: ...\n"
-            "- **M2 Extensions**: ...\n"
-            "- **SEO**: ...\n"
+            f"{group_template_lines}\n"
             "\n"
             "**Các điểm cần chú ý**\n"
-            "- **B2B**: ...\n"
-            "- **M2 Extensions**: ...\n"
-            "- **SEO**: ...\n"
+            f"{group_template_lines}\n"
             "\n"
             "Quy tắc nội dung:\n"
             "- Phải nhắc đủ từng cluster chính trong dữ liệu, không bỏ sót cluster nào.\n"
