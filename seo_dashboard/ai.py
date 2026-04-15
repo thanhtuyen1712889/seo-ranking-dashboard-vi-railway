@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from datetime import datetime
 from typing import Any
 
@@ -89,17 +90,72 @@ def fallback_weekly_range_note(context: dict[str, Any]) -> str:
     watch_name = watchlist[0]["name"] if watchlist else weakest["name"]
     compare_text = context.get("compare_label") or "kỳ trước"
     baseline_text = context.get("baseline_label") or "baseline dài hạn"
+    overall = context.get("overall_summary") or {}
+    direction = str(overall.get("direction") or "mixed")
+    target_keywords = int(overall.get("target_keywords") or 0)
+    current_hits = int(overall.get("current_hits") or 0)
+    compare_hits = overall.get("compare_hits")
+    current_rate = overall.get("current_kpi_rate")
+    compare_rate = overall.get("compare_kpi_rate")
+    baseline_rate = overall.get("baseline_kpi_rate")
+    delta_compare = overall.get("kpi_rate_delta_compare")
+    delta_baseline = overall.get("kpi_rate_delta_baseline")
+
+    def _delta_text(value: float | int | None) -> str:
+        if value is None:
+            return "0.0"
+        number = float(value)
+        prefix = "+" if number > 0 else ""
+        return f"{prefix}{number:.1f}"
+
+    def _rate_text(value: float | int | None) -> str:
+        if value is None:
+            return "--"
+        return f"{float(value):.1f}"
+
+    compare_segment = (
+        f"{int(compare_hits or 0)}/{target_keywords} ({_rate_text(compare_rate)}%) ({_delta_text(delta_compare)} điểm)"
+        if compare_rate is not None
+        else "chưa có dữ liệu kỳ trước tương đương"
+    )
+
+    if direction == "declining":
+        trend_line = (
+            f"- Trong giai đoạn {context['from_label']} - {context['to_label']}, hiệu suất tổng thể **đang giảm** so với {compare_text}: "
+            f"KPI đạt {current_hits}/{target_keywords} ({_rate_text(current_rate)}%), thấp hơn kỳ trước {compare_segment}."
+        )
+    elif direction == "improving":
+        trend_line = (
+            f"- Trong giai đoạn {context['from_label']} - {context['to_label']}, hiệu suất tổng thể **đang cải thiện** so với {compare_text}: "
+            f"KPI đạt {current_hits}/{target_keywords} ({_rate_text(current_rate)}%), cao hơn kỳ trước {compare_segment}."
+        )
+    else:
+        if compare_rate is not None:
+            trend_line = (
+                f"- Trong giai đoạn {context['from_label']} - {context['to_label']}, hiệu suất tổng thể **đang phân hóa** so với {compare_text}: "
+                f"KPI hiện tại {current_hits}/{target_keywords} ({_rate_text(current_rate)}%), chênh "
+                f"{_delta_text(delta_compare)} điểm so với kỳ trước ({_rate_text(compare_rate)}%)."
+            )
+        else:
+            trend_line = (
+                f"- Trong giai đoạn {context['from_label']} - {context['to_label']}, hiệu suất tổng thể **đang phân hóa**: "
+                f"KPI hiện tại {current_hits}/{target_keywords} ({_rate_text(current_rate)}%), "
+                "chưa đủ dữ liệu kỳ trước tương đương để kết luận tăng/giảm toàn cục."
+            )
+
+    baseline_line = (
+        f"- So với {baseline_text}, KPI tổng thể hiện {_rate_text(current_rate)}% "
+        f"({current_hits}/{target_keywords}), chênh {_delta_text(delta_baseline)} điểm."
+        if baseline_rate is not None
+        else f"- Chưa đủ dữ liệu baseline dài để kết luận xu hướng dài hạn."
+    )
 
     overview_lines = [
         "**Tổng quan**",
+        trend_line,
+        baseline_line,
         (
-            f"- Trong giai đoạn {context['from_label']} - {context['to_label']}, "
-            f"**{strongest['name']}** là nhóm kéo nhịp tích cực rõ nhất so với {compare_text}, "
-            f"trong khi **{weakest['name']}** đang chậm hơn mặt bằng chung."
-        ),
-        (
-            f"- So với {baseline_text}, hiệu suất tổng thể hiện "
-            f"{'đang cải thiện' if (context.get('overall_delta') or 0) > 0 else 'cần theo dõi thêm'}."
+            f"- Cụm dẫn nhịp trong kỳ là **{strongest['name']}**, còn cụm cần ưu tiên theo dõi là **{weakest['name']}**."
         ),
     ]
 
@@ -150,6 +206,35 @@ def weekly_note_has_structure(content: str) -> bool:
     return has_sections and has_bullets
 
 
+def weekly_note_matches_overall_direction(content: str, context: dict[str, Any]) -> bool:
+    overall = context.get("overall_summary") or {}
+    direction = str(overall.get("direction") or "mixed")
+    if direction not in {"declining", "improving", "mixed"}:
+        return True
+
+    normalized = (content or "").lower()
+    overview_text = normalized.split("**các điểm sáng**")[0]
+    positive_markers = ["cải thiện", "đi lên", "tăng", "khởi sắc", "tích cực"]
+    negative_markers = ["giảm", "đi xuống", "suy giảm", "chậm lại", "tụt", "xấu đi"]
+
+    has_positive = any(marker in overview_text for marker in positive_markers)
+    has_negative = any(marker in overview_text for marker in negative_markers)
+
+    if direction == "declining":
+        if not has_negative:
+            return False
+        if re.search(r"tổng thể[^\\n]*cải thiện", overview_text):
+            return False
+        return True
+    if direction == "improving":
+        if not has_positive:
+            return False
+        if re.search(r"tổng thể[^\\n]*(đang giảm|đi xuống|suy giảm)", overview_text):
+            return False
+        return True
+    return "phân hóa" in overview_text or (has_positive and has_negative)
+
+
 def ensure_complete_weekly_range_note(content: str | None, context: dict[str, Any]) -> str:
     if not content:
         return fallback_weekly_range_note(context)
@@ -159,6 +244,8 @@ def ensure_complete_weekly_range_note(content: str | None, context: dict[str, An
     if not weekly_note_has_structure(normalized):
         return fallback_weekly_range_note(context)
     if not weekly_note_mentions_all_groups(normalized, context):
+        return fallback_weekly_range_note(context)
+    if not weekly_note_matches_overall_direction(normalized, context):
         return fallback_weekly_range_note(context)
     return normalized
 

@@ -2272,10 +2272,15 @@ class DashboardService:
         current_dates = resolved_range["current_dates"]
         compare_dates = resolved_range["compare_dates"]
         baseline_dates = resolved_range["baseline_dates"]
+        group_target_map = self._group_target_keyword_map(project_id)
+        latest_date = resolved_range["to_date"]
+        compare_latest_date = resolved_range["compare_to_date"]
+        baseline_latest_date = resolved_range["baseline_to_date"]
 
         metrics: dict[str, dict[str, Any]] = {}
         for keyword in keywords:
             group_name = keyword.get("group_name") or "Chưa phân nhóm"
+            kpi_target = int(keyword.get("kpi_target") or 10)
             current_positions = [
                 float(position)
                 for rank_date in current_dates
@@ -2304,18 +2309,31 @@ class DashboardService:
                     "compare_positions": [],
                     "baseline_positions": [],
                     "latest_ranks": [],
+                    "kpi_hits_current": 0,
+                    "kpi_hits_compare": 0,
+                    "kpi_hits_baseline": 0,
                 },
             )
             entry["keyword_count"] += 1
             entry["current_positions"].extend(current_positions)
             entry["compare_positions"].extend(compare_positions)
             entry["baseline_positions"].extend(baseline_positions)
-            entry["kpi_targets"].append(int(keyword.get("kpi_target") or 10))
+            entry["kpi_targets"].append(kpi_target)
             if keyword.get("search_volume") is not None:
                 entry["volumes"].append(float(keyword["search_volume"]))
-            latest_rank = self._history_position(keyword["history"], current_dates[-1])
+            latest_rank = self._history_position(keyword["history"], latest_date)
             if latest_rank is not None:
                 entry["latest_ranks"].append(float(latest_rank))
+                if float(latest_rank) <= kpi_target:
+                    entry["kpi_hits_current"] += 1
+            if compare_latest_date:
+                compare_latest_rank = self._history_position(keyword["history"], compare_latest_date)
+                if compare_latest_rank is not None and float(compare_latest_rank) <= kpi_target:
+                    entry["kpi_hits_compare"] += 1
+            if baseline_latest_date:
+                baseline_latest_rank = self._history_position(keyword["history"], baseline_latest_date)
+                if baseline_latest_rank is not None and float(baseline_latest_rank) <= kpi_target:
+                    entry["kpi_hits_baseline"] += 1
 
         max_total_volume = max((sum(entry["volumes"]) for entry in metrics.values()), default=1.0)
         group_rows: list[dict[str, Any]] = []
@@ -2329,12 +2347,44 @@ class DashboardService:
                 if avg_rank_current is not None and compare_reference is not None
                 else 0.0
             )
-            if rank_delta >= 2:
-                trend_status = "rising"
-            elif rank_delta <= -2:
-                trend_status = "declining"
+            target_keywords = int(group_target_map.get(entry["name"]) or entry["keyword_count"] or 1)
+            kpi_hits_current = int(entry["kpi_hits_current"])
+            kpi_hits_compare = int(entry["kpi_hits_compare"])
+            kpi_hits_baseline = int(entry["kpi_hits_baseline"])
+            kpi_rate_current = round((kpi_hits_current / max(1, target_keywords)) * 100, 1)
+            kpi_rate_compare = (
+                round((kpi_hits_compare / max(1, target_keywords)) * 100, 1)
+                if compare_latest_date
+                else None
+            )
+            kpi_rate_baseline = (
+                round((kpi_hits_baseline / max(1, target_keywords)) * 100, 1)
+                if baseline_latest_date
+                else None
+            )
+            kpi_rate_delta_compare = (
+                round(kpi_rate_current - kpi_rate_compare, 1)
+                if kpi_rate_compare is not None
+                else None
+            )
+            if kpi_rate_delta_compare is not None:
+                if kpi_rate_delta_compare <= -0.8:
+                    trend_status = "declining"
+                elif kpi_rate_delta_compare >= 0.8 and rank_delta > -1:
+                    trend_status = "rising"
+                elif rank_delta >= 2:
+                    trend_status = "rising"
+                elif rank_delta <= -2:
+                    trend_status = "declining"
+                else:
+                    trend_status = "stable"
             else:
-                trend_status = "stable"
+                if rank_delta >= 2:
+                    trend_status = "rising"
+                elif rank_delta <= -2:
+                    trend_status = "declining"
+                else:
+                    trend_status = "stable"
             total_volume = int(sum(entry["volumes"]))
             volume_component = clamp((total_volume / max_total_volume) * 100 if max_total_volume else 0, 0, 100)
             rank_component = (
@@ -2348,6 +2398,7 @@ class DashboardService:
                 {
                     "name": entry["name"],
                     "keyword_count": entry["keyword_count"],
+                    "target_keywords": target_keywords,
                     "total_volume": total_volume,
                     "avg_volume": round(total_volume / entry["keyword_count"], 1) if entry["keyword_count"] else 0,
                     "avg_rank_current": avg_rank_current,
@@ -2358,6 +2409,18 @@ class DashboardService:
                     "health_score": health_score,
                     "latest_avg_rank": safe_mean(entry["latest_ranks"]),
                     "kpi_target": Counter(entry["kpi_targets"]).most_common(1)[0][0] if entry["kpi_targets"] else 10,
+                    "kpi_hits_current": kpi_hits_current,
+                    "kpi_hits_compare": kpi_hits_compare,
+                    "kpi_hits_baseline": kpi_hits_baseline,
+                    "kpi_rate_current": kpi_rate_current,
+                    "kpi_rate_compare": kpi_rate_compare,
+                    "kpi_rate_baseline": kpi_rate_baseline,
+                    "kpi_rate_delta_compare": kpi_rate_delta_compare,
+                    "kpi_rate_delta_baseline": (
+                        round(kpi_rate_current - kpi_rate_baseline, 1)
+                        if kpi_rate_baseline is not None
+                        else None
+                    ),
                 }
             )
 
@@ -2373,20 +2436,69 @@ class DashboardService:
             [
                 item
                 for item in group_rows
-                if item["trend_status"] == "rising" and (item.get("avg_rank_current") or 999) > 5
+                if item["trend_status"] == "rising"
+                and (
+                    (item.get("kpi_rate_delta_compare") or 0) > 0
+                    or (item.get("avg_rank_current") or 999) > 5
+                )
             ],
-            key=lambda item: (-(item.get("rank_delta") or 0), -(item.get("health_score") or 0)),
+            key=lambda item: (
+                -(item.get("kpi_rate_delta_compare") or 0),
+                -(item.get("rank_delta") or 0),
+                -(item.get("health_score") or 0),
+            ),
         )
         watchlist = sorted(
             [
                 item
                 for item in group_rows
-                if item["trend_status"] == "declining" or (item.get("health_score") or 0) < 55
+                if item["trend_status"] == "declining"
+                or (item.get("health_score") or 0) < 55
+                or (item.get("kpi_rate_delta_compare") or 0) < 0
             ],
-            key=lambda item: ((item.get("rank_delta") or 0), item.get("health_score") or 0),
+            key=lambda item: (
+                item.get("kpi_rate_delta_compare") or 0,
+                (item.get("rank_delta") or 0),
+                item.get("health_score") or 0,
+            ),
         )
 
         overall_delta = safe_mean([float(item["rank_delta"]) for item in group_rows]) or 0.0
+        total_target_keywords = int(sum(int(item.get("target_keywords") or 0) for item in group_rows) or len(keywords) or 1)
+        total_hits_current = int(sum(int(item.get("kpi_hits_current") or 0) for item in group_rows))
+        total_hits_compare = int(sum(int(item.get("kpi_hits_compare") or 0) for item in group_rows))
+        total_hits_baseline = int(sum(int(item.get("kpi_hits_baseline") or 0) for item in group_rows))
+        overall_kpi_rate_current = round((total_hits_current / max(1, total_target_keywords)) * 100, 1)
+        overall_kpi_rate_compare = (
+            round((total_hits_compare / max(1, total_target_keywords)) * 100, 1)
+            if compare_latest_date
+            else None
+        )
+        overall_kpi_rate_baseline = (
+            round((total_hits_baseline / max(1, total_target_keywords)) * 100, 1)
+            if baseline_latest_date
+            else None
+        )
+        overall_kpi_rate_delta_compare = (
+            round(overall_kpi_rate_current - overall_kpi_rate_compare, 1)
+            if overall_kpi_rate_compare is not None
+            else None
+        )
+        overall_direction = "mixed"
+        if overall_kpi_rate_delta_compare is not None:
+            if overall_kpi_rate_delta_compare <= -0.8 or total_hits_current < total_hits_compare:
+                overall_direction = "declining"
+            elif overall_kpi_rate_delta_compare >= 0.8 and overall_delta > -1:
+                overall_direction = "improving"
+            else:
+                overall_direction = "mixed"
+        else:
+            if overall_delta <= -2:
+                overall_direction = "declining"
+            elif overall_delta >= 2:
+                overall_direction = "improving"
+            else:
+                overall_direction = "mixed"
         compare_label = (
             f"{format_date_label(resolved_range['compare_from_date'])} - {format_date_label(resolved_range['compare_to_date'])}"
             if resolved_range["compare_from_date"] and resolved_range["compare_to_date"]
@@ -2406,6 +2518,23 @@ class DashboardService:
             "compare_label": compare_label,
             "baseline_label": baseline_label,
             "overall_delta": overall_delta,
+            "overall_summary": {
+                "direction": overall_direction,
+                "target_keywords": total_target_keywords,
+                "current_hits": total_hits_current,
+                "compare_hits": total_hits_compare,
+                "baseline_hits": total_hits_baseline,
+                "current_kpi_rate": overall_kpi_rate_current,
+                "compare_kpi_rate": overall_kpi_rate_compare,
+                "baseline_kpi_rate": overall_kpi_rate_baseline,
+                "kpi_rate_delta_compare": overall_kpi_rate_delta_compare,
+                "kpi_rate_delta_baseline": (
+                    round(overall_kpi_rate_current - overall_kpi_rate_baseline, 1)
+                    if overall_kpi_rate_baseline is not None
+                    else None
+                ),
+                "avg_rank_delta_compare": overall_delta,
+            },
             "groups": group_rows,
             "opportunities": opportunities[:3],
             "watchlist": watchlist[:3],
@@ -2605,6 +2734,7 @@ class DashboardService:
             "group_breakdowns": context["group_breakdowns"],
             "opportunities": context["opportunities"],
             "watchlist": context["watchlist"],
+            "overall_summary": context.get("overall_summary") or {},
             "seo_input": seo_input.strip() or None,
         }
         prompt = (
@@ -2631,6 +2761,11 @@ class DashboardService:
             "- Nếu nói tăng/phục hồi thì cố gắng ghi rõ từ top nào lên top nào, từ ngày nào đến ngày nào.\n"
             "- Nếu nói giảm thì cố gắng ghi rõ từ top nào xuống top nào, từ ngày nào đến ngày nào.\n"
             "- Nếu có thể, thêm 1 trường hợp đặc biệt là keyword hiệu suất tốt hoặc keyword giảm mạnh.\n"
+            "- Bắt buộc bám `overall_summary.direction`:\n"
+            "  + Nếu direction = declining: phần Tổng quan phải kết luận tổng thể đang giảm/chậm lại, không được viết tổng thể cải thiện.\n"
+            "  + Nếu direction = improving: phần Tổng quan phải kết luận tổng thể cải thiện.\n"
+            "  + Nếu direction = mixed: phần Tổng quan phải kết luận phân hóa, không nghiêng hẳn tăng hoặc giảm.\n"
+            "- Phải nêu rõ KPI tổng thể kỳ hiện tại và chênh lệch so với kỳ trước (theo overall_summary).\n"
             "Yêu cầu:\n"
             "- Không viết chung chung kiểu dữ liệu ổn.\n"
             "- Phải bám tên cluster/sub-cluster thật trong dữ liệu.\n"
